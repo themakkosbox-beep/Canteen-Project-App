@@ -1,0 +1,23 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+  }
+}
+
+@layer components {
+  .pos-button {
+    @apply bg-camp-500 hover:bg-camp-600 text-white font-semibold py-3 px-6 rounded-lg transition-colors duration-200;
+  }
+  
+  .pos-input {
+    @apply border-2 border-gray-300 rounded-lg px-4 py-2 text-lg focus:border-camp-500 focus:outline-none;
+  }
+  
+  .transaction-row {
+    @apply border-b border-gray-200 py-2 text-sm;
+  }
+}

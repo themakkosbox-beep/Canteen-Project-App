@@ -1,0 +1,39 @@
+{
+  "name": "camp-canteen-pos",
+  "version": "1.0.0",
+  "description": "Camp Canteen POS System with prepaid accounts and barcode scanning",
+  "main": "index.js",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "db:setup": "node scripts/setup-db.js"
+  },
+  "dependencies": {
+    "next": "^14.0.0",
+    "react": "^18.0.0",
+  "react-dom": "^18.0.0",
+  "sql.js": "^1.10.2",
+    "@types/node": "^20.0.0",
+    "@types/react": "^18.0.0",
+    "@types/react-dom": "^18.0.0",
+    "typescript": "^5.0.0",
+    "tailwindcss": "^3.3.0",
+    "autoprefixer": "^10.4.16",
+    "postcss": "^8.4.31"
+  },
+  "devDependencies": {
+    "eslint": "^8.0.0",
+    "eslint-config-next": "^14.0.0"
+  },
+  "keywords": [
+    "pos",
+    "canteen",
+    "barcode",
+    "offline",
+    "prepaid"
+  ],
+  "author": "Duvid",
+  "license": "MIT"
+}
