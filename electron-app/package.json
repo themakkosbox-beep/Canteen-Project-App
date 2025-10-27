@@ -1,0 +1,22 @@
+{
+  "name": "camp-canteen-pos-desktop",
+  "version": "1.0.0",
+  "description": "Desktop wrapper for the Camp Canteen POS application",
+  "private": true,
+  "main": "main.js",
+  "author": "Camp Canteen Team",
+  "scripts": {
+    "dev": "cross-env NODE_ENV=development electron .",
+    "start": "cross-env NODE_ENV=production electron .",
+    "build:web": "npm run build --prefix ..",
+    "package": "npm run build:web && electron-builder"
+  },
+  "devDependencies": {
+    "cross-env": "^7.0.3",
+    "electron": "^31.3.0",
+    "electron-builder": "^24.9.1"
+  },
+  "dependencies": {
+    "wait-on": "^7.0.1"
+  }
+}

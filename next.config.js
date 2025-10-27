@@ -1,13 +1,15 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  experimental: {
-    appDir: true,
-  },
-  // Enable for offline-first capabilities
   swcMinify: true,
-  // Configure for desktop app feel
   trailingSlash: false,
-  output: 'standalone'
-}
+  output: 'standalone',
+  webpack: (config, { isServer }) => {
+    if (isServer) {
+      config.externals = config.externals || [];
+      config.externals.push({ 'sql.js': 'commonjs sql.js' });
+    }
+    return config;
+  },
+};
 
-module.exports = nextConfig
+module.exports = nextConfig;

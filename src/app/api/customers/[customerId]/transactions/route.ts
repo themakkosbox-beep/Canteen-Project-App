@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import DatabaseManager from '@/lib/database';
 
+export const runtime = 'nodejs';
+
 export async function GET(
   request: NextRequest,
   { params }: { params: { customerId: string } }

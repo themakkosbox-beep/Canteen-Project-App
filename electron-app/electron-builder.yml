@@ -1,0 +1,27 @@
+appId: com.camp.canteen.pos
+productName: Camp Canteen POS
+directories:
+  output: dist
+  buildResources: assets
+files:
+  - "!dist{,/**/*}"
+extraResources:
+  - from: ../.next/standalone
+    to: .next/standalone
+  - from: ../.next/static
+    to: .next/standalone/.next/static
+  - from: ../public
+    to: .next/standalone/public
+  - from: ../package.json
+    to: app-package.json
+  - from: ../node_modules/sql.js
+    to: .next/standalone/node_modules/sql.js
+win:
+  icon: app-icon.ico
+  target:
+    - nsis
+    - zip
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true

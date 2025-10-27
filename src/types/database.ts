@@ -17,6 +17,41 @@ export interface Product {
   active: boolean;
   created_at: string;
   updated_at: string;
+  options_json?: string | null;
+  options?: ProductOptionGroup[];
+}
+
+export interface ProductOptionChoice {
+  id: string;
+  label: string;
+}
+
+export interface ProductOptionGroup {
+  id: string;
+  name: string;
+  required: boolean;
+  multiple: boolean;
+  choices: ProductOptionChoice[];
+}
+
+export interface QuickKeySlot {
+  index: number;
+  productId: string | null;
+  product?: Product | null;
+}
+
+export interface TransactionExportRow {
+  transaction_id: string;
+  timestamp: string;
+  customer_id: string;
+  customer_name?: string;
+  type: Transaction['type'];
+  product_id?: string;
+  product_name?: string;
+  product_price?: number;
+  amount: number;
+  balance_after: number;
+  note?: string;
 }
 
 export interface Transaction {

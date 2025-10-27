@@ -1,23 +1,38 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import 'tailwindcss/base';
+@import 'tailwindcss/components';
+@import 'tailwindcss/utilities';
 
-@layer base {
-  body {
-    font-family: system-ui, -apple-system, sans-serif;
-  }
+body {
+  font-family: system-ui, -apple-system, sans-serif;
 }
 
-@layer components {
-  .pos-button {
-    @apply bg-camp-500 hover:bg-camp-600 text-white font-semibold py-3 px-6 rounded-lg transition-colors duration-200;
-  }
-  
-  .pos-input {
-    @apply border-2 border-gray-300 rounded-lg px-4 py-2 text-lg focus:border-camp-500 focus:outline-none;
-  }
-  
-  .transaction-row {
-    @apply border-b border-gray-200 py-2 text-sm;
-  }
+.pos-button {
+  background-color: #3b82f6;
+  color: #ffffff;
+  font-weight: 600;
+  padding: 0.75rem 1.5rem;
+  border-radius: 0.75rem;
+  transition: background-color 0.2s ease-in-out;
+}
+
+.pos-button:hover {
+  background-color: #2563eb;
+}
+
+.pos-input {
+  border: 2px solid #d1d5db;
+  border-radius: 0.75rem;
+  padding: 0.5rem 1rem;
+  font-size: 1.125rem;
+}
+
+.pos-input:focus {
+  border-color: #3b82f6;
+  outline: none;
+}
+
+.transaction-row {
+  border-bottom: 1px solid #e5e7eb;
+  padding: 0.5rem 0;
+  font-size: 0.875rem;
 }
