@@ -1,6 +1,7 @@
 'use strict';
 
 const { app, BrowserWindow, dialog } = require('electron');
+const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const { spawn, fork } = require('child_process');
 const waitOn = require('wait-on');
@@ -91,12 +92,61 @@ function createWindow() {
   if (isDev) {
     mainWindow.webContents.openDevTools({ mode: 'detach' });
   }
+
+  return mainWindow;
+}
+
+function registerAutoUpdater(mainWindow) {
+  if (isDev) {
+    return;
+  }
+
+  autoUpdater.on('update-available', () => {
+    dialog.showMessageBox(mainWindow, {
+      type: 'info',
+      title: 'Update Available',
+      message: 'A new version is downloading in the background.',
+    });
+  });
+
+  autoUpdater.on('update-not-available', () => {
+    // Fail silently; users can ignore this.
+  });
+
+  autoUpdater.on('error', (error) => {
+    console.error('Auto update error:', error);
+  });
+
+  autoUpdater.on('update-downloaded', () => {
+    dialog
+      .showMessageBox(mainWindow, {
+        type: 'question',
+        buttons: ['Restart Now', 'Later'],
+        defaultId: 0,
+        cancelId: 1,
+        title: 'Update Ready',
+        message: 'An update has been downloaded. Restart now to apply it?',
+      })
+      .then((result) => {
+        if (result.response === 0) {
+          autoUpdater.quitAndInstall();
+        }
+      })
+      .catch((error) => {
+        console.error('Failed to prompt for update restart:', error);
+      });
+  });
+
+  autoUpdater.checkForUpdatesAndNotify().catch((error) => {
+    console.error('Failed to check for updates:', error);
+  });
 }
 
 async function bootstrap() {
   try {
     await startNextServer();
-    createWindow();
+    const window = createWindow();
+    registerAutoUpdater(window);
   } catch (error) {
     console.error('Failed to launch desktop app:', error);
     dialog.showErrorBox('Launch Error', error instanceof Error ? error.message : String(error));

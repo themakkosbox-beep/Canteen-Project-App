@@ -921,7 +921,6 @@ export default function POSPage() {
                   <div className="flex gap-3">
                     <input
                       className="w-full rounded-lg border border-gray-300 px-4 py-2 text-lg shadow-sm focus:border-camp-500 focus:outline-none focus:ring-2 focus:ring-camp-200"
-                      disabled={!state.currentCustomer}
                       id="barcode"
                       onChange={(event) => setBarcodeInput(event.target.value)}
                       onKeyDown={(event) => {
@@ -966,7 +965,6 @@ export default function POSPage() {
                   <div className="relative mt-2">
                     <input
                       className="w-full rounded-lg border border-gray-300 px-4 py-2 text-lg shadow-sm focus:border-camp-500 focus:outline-none focus:ring-2 focus:ring-camp-200"
-                      disabled={!state.currentCustomer}
                       id="product-search"
                       onBlur={() => setTimeout(() => setShowProductDropdown(false), 150)}
                       onChange={(event) => {

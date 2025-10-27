@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import DatabaseManager from '@/lib/database';
-import { Product } from '@/types/database';
+import { serializeProduct } from './serializer';
 
 export const runtime = 'nodejs';
 
@@ -124,23 +124,3 @@ export async function PATCH(request: NextRequest) {
   }
 }
 
-export function serializeProduct(product: Product) {
-  let options = product.options;
-  if (!options && product.options_json) {
-    try {
-      const parsed = JSON.parse(product.options_json);
-      if (Array.isArray(parsed)) {
-        options = parsed;
-      }
-    } catch (error) {
-      console.warn('Failed to parse product options in serializeProduct', error);
-    }
-  }
-
-  const { options_json: unusedOptionsJson, ...rest } = product;
-  void unusedOptionsJson;
-  return {
-    ...rest,
-    options,
-  };
-}

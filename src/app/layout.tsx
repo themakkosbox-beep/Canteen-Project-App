@@ -12,6 +12,8 @@ export default function RootLayout({
 }: {
   children: React.ReactNode
 }) {
+  const appVersion = process.env.NEXT_PUBLIC_APP_VERSION ?? '0.0.0';
+
   return (
     <html lang="en">
       <head>
@@ -22,6 +24,9 @@ export default function RootLayout({
         <main className="pt-6">
           {children}
         </main>
+        <div className="pointer-events-none fixed bottom-2 right-3 text-xs font-medium text-gray-300">
+          v{appVersion}
+        </div>
       </body>
     </html>
   )

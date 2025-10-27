@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import DatabaseManager from '@/lib/database';
-import { serializeProduct } from '../../products/route';
+import { serializeProduct } from '../../products/serializer';
 
 export const runtime = 'nodejs';
 
