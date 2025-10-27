@@ -116,6 +116,7 @@ export default function POSPage() {
     error: null,
   });
   const [creatingLearnProduct, setCreatingLearnProduct] = useState(false);
+  const [currentTime, setCurrentTime] = useState(() => new Date());
 
   const barcodeInputRef = useRef<HTMLInputElement>(null);
 
@@ -182,6 +183,11 @@ export default function POSPage() {
       barcodeInputRef.current.focus();
     }
   }, [state.currentCustomer]);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => setCurrentTime(new Date()), 1000);
+    return () => window.clearInterval(interval);
+  }, []);
 
   const loadQuickKeys = async () => {
     setLoadingQuickKeys(true);
@@ -792,6 +798,15 @@ export default function POSPage() {
   const activeTrainingAutoBalance = activeTrainingCustomerId
     ? Boolean(trainingCustomers[activeTrainingCustomerId]?.autoBalance)
     : false;
+  const formattedCurrentTime = useMemo(
+    () =>
+      currentTime.toLocaleTimeString('en-US', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      }),
+    [currentTime]
+  );
 
   return (
     <div className="flex min-h-screen flex-col bg-gray-50">
@@ -800,8 +815,22 @@ export default function POSPage() {
           <div>
             <h1 className="text-lg font-semibold text-gray-900">Point of Sale</h1>
             <p className="text-sm text-gray-500">Scan barcodes, use quick keys, or search products to charge customers.</p>
+            <time
+              aria-live="polite"
+              className="mt-2 block text-sm font-semibold text-gray-600 sm:hidden"
+              dateTime={currentTime.toISOString()}
+            >
+              {formattedCurrentTime}
+            </time>
           </div>
           <div className="flex items-center gap-3">
+            <time
+              aria-live="polite"
+              className="hidden text-sm font-semibold text-gray-600 sm:block"
+              dateTime={currentTime.toISOString()}
+            >
+              {formattedCurrentTime}
+            </time>
             <button
               className={toggleClass(trainingMode)}
               onClick={() => setTrainingMode((prev) => !prev)}
