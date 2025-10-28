@@ -36,7 +36,25 @@ class DatabaseManager {
   private readonly sqlPromise: Promise<SqlJsStatic>;
 
   private constructor() {
-    this.dbPath = path.join(process.cwd(), 'canteen.db');
+    const dataRoot = process.env.CANTEEN_DATA_DIR && process.env.CANTEEN_DATA_DIR.trim().length > 0
+      ? process.env.CANTEEN_DATA_DIR.trim()
+      : process.cwd();
+    try {
+      fs.mkdirSync(dataRoot, { recursive: true });
+    } catch (error) {
+      console.warn('Failed to ensure data directory', error);
+    }
+    this.dbPath = path.join(dataRoot, 'canteen.db');
+    if (!fs.existsSync(this.dbPath)) {
+      const bundledDb = path.join(process.cwd(), 'canteen.db');
+      try {
+        if (fs.existsSync(bundledDb)) {
+          fs.copyFileSync(bundledDb, this.dbPath);
+        }
+      } catch (error) {
+        console.warn('Failed to copy bundled database to writable directory', error);
+      }
+    }
     this.sqlPromise = this.loadSqlJs();
   }
 

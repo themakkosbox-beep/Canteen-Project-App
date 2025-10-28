@@ -33,8 +33,11 @@ export default function HomePage() {
               <li>Prepaid customer accounts with 4-digit IDs</li>
               <li>Barcode scanning for instant purchases</li>
               <li>Complete transaction logging</li>
-              <li>Offline-first operation</li>
-              <li>Balance adjustments and deposits</li>
+              <li>Training mode sandbox for staff practice</li>
+              <li>Quick key buttons for top products</li>
+              <li>Bulk customer &amp; product imports from CSV</li>
+              <li>Exportable end-of-day transaction reports</li>
+              <li>Auto-updating Windows desktop app</li>
             </ul>
           </div>
         </div>

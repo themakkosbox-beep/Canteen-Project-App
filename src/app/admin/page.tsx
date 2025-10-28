@@ -65,6 +65,8 @@ export default function AdminPage() {
   const [bulkProductInput, setBulkProductInput] = useState('');
   const [bulkCustomerLoading, setBulkCustomerLoading] = useState(false);
   const [bulkProductLoading, setBulkProductLoading] = useState(false);
+  const [showCustomerImport, setShowCustomerImport] = useState(false);
+  const [showProductImport, setShowProductImport] = useState(false);
 
   const [customerSearch, setCustomerSearch] = useState('');
   const [productSearch, setProductSearch] = useState('');
@@ -442,10 +444,7 @@ export default function AdminPage() {
     }
 
     const trimmedName = customerForm.name.trim();
-    if (editingCustomerId && trimmedName.length === 0) {
-      setError('Customer name is required');
-      return;
-    }
+    const normalizedName = trimmedName.length > 0 ? trimmedName : null;
 
     const parsedBalance = customerForm.initialBalance.trim().length
       ? Number.parseFloat(customerForm.initialBalance)
@@ -461,7 +460,7 @@ export default function AdminPage() {
         const response = await fetch(`/api/customers/${editingCustomerId}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: trimmedName }),
+          body: JSON.stringify({ name: normalizedName }),
         });
 
         if (!response.ok) {
@@ -476,7 +475,7 @@ export default function AdminPage() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             customerId: trimmedId,
-            name: trimmedName,
+            name: normalizedName,
             initialBalance: parsedBalance,
           }),
         });
@@ -985,18 +984,20 @@ export default function AdminPage() {
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700">Name</label>
+              <p className="text-xs text-gray-500 mt-1">Optional—leave blank if the camper prefers to stay anonymous.</p>
               <input
                 type="text"
                 value={customerForm.name}
                 onChange={(event) =>
                   setCustomerForm((prev) => ({ ...prev, name: event.target.value }))
                 }
-                className="pos-input w-full mt-1"
+                className="pos-input w-full mt-2"
                 placeholder="Camper name (optional)"
               />
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700">Initial Balance</label>
+              <p className="text-xs text-gray-500 mt-1">Optional—defaults to 0.00 for new accounts.</p>
               <input
                 type="number"
                 min="0"
@@ -1005,7 +1006,7 @@ export default function AdminPage() {
                 onChange={(event) =>
                   setCustomerForm((prev) => ({ ...prev, initialBalance: event.target.value }))
                 }
-                className="pos-input w-full mt-1"
+                className="pos-input w-full mt-2"
                 placeholder="0.00"
                 disabled={Boolean(editingCustomerId)}
               />
@@ -1100,35 +1101,55 @@ export default function AdminPage() {
           </div>
 
           <div className="border-t border-gray-200 pt-6">
-            <h3 className="text-lg font-semibold mb-3">Bulk Import Customers</h3>
-            <p className="text-sm text-gray-600 mb-3">
-              Paste one customer per line using <code className="font-mono bg-gray-100 px-1 py-0.5 rounded">1234, Name, InitialBalance</code>. Initial balance is optional.
-            </p>
-            <form onSubmit={handleBulkCustomerSubmit} className="space-y-3">
-              <textarea
-                value={bulkCustomerInput}
-                onChange={(event) => setBulkCustomerInput(event.target.value)}
-                className="pos-input w-full h-32 font-mono text-sm"
-                placeholder={`1234, Jane Camper, 25.00\n5678, John Camper`}
-              />
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="submit"
-                  className="pos-button"
-                  disabled={bulkCustomerLoading || bulkCustomerInput.trim().length === 0}
-                >
-                  {bulkCustomerLoading ? 'Importing…' : 'Import Customers'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setBulkCustomerInput('')}
-                  className="bg-gray-300 text-gray-800 font-semibold py-3 px-6 rounded-lg"
-                  disabled={bulkCustomerLoading}
-                >
-                  Clear
-                </button>
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h3 className="text-lg font-semibold">Bulk Import Customers</h3>
+                <p className="text-sm text-gray-600">
+                  Paste one customer per line using <code className="font-mono bg-gray-100 px-1 py-0.5 rounded">1234, Name, InitialBalance</code>.
+                </p>
               </div>
-            </form>
+              <button
+                type="button"
+                onClick={() => setShowCustomerImport((prev) => !prev)}
+                className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700 hover:border-camp-500"
+              >
+                {showCustomerImport ? 'Hide Fields' : 'Show Fields'}
+              </button>
+            </div>
+            {showCustomerImport ? (
+              <form onSubmit={handleBulkCustomerSubmit} className="mt-4 space-y-3">
+                <p className="text-xs text-gray-500">
+                  Initial balance is optional—leave blank for zero.
+                </p>
+                <textarea
+                  value={bulkCustomerInput}
+                  onChange={(event) => setBulkCustomerInput(event.target.value)}
+                  className="pos-input w-full h-32 font-mono text-sm"
+                  placeholder={`1234, Jane Camper, 25.00\n5678, John Camper`}
+                />
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="submit"
+                    className="pos-button"
+                    disabled={bulkCustomerLoading || bulkCustomerInput.trim().length === 0}
+                  >
+                    {bulkCustomerLoading ? 'Importing…' : 'Import Customers'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setBulkCustomerInput('')}
+                    className="bg-gray-300 text-gray-800 font-semibold py-3 px-6 rounded-lg"
+                    disabled={bulkCustomerLoading}
+                  >
+                    Clear
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <p className="mt-4 text-sm text-gray-500">
+                Keep imports tucked away until you need them—use the toggle to paste rows.
+              </p>
+            )}
           </div>
         </section>
 
@@ -1360,35 +1381,55 @@ export default function AdminPage() {
           </div>
 
           <div className="border-t border-gray-200 pt-6">
-            <h3 className="text-lg font-semibold mb-3">Bulk Import Products</h3>
-            <p className="text-sm text-gray-600 mb-3">
-              Format: <code className="font-mono bg-gray-100 px-1 py-0.5 rounded">Name, Price, ProductID, Barcode, Category, Active</code>. Only name and price are required. Use <code className="font-mono bg-gray-100 px-1 py-0.5 rounded">true</code> or <code className="font-mono bg-gray-100 px-1 py-0.5 rounded">false</code> for the active flag.
-            </p>
-            <form onSubmit={handleBulkProductSubmit} className="space-y-3">
-              <textarea
-                value={bulkProductInput}
-                onChange={(event) => setBulkProductInput(event.target.value)}
-                className="pos-input w-full h-32 font-mono text-sm"
-                placeholder={`Soda, 1.50, PRD_123, 0123456789, Drinks, true\nChips, 2.25`}
-              />
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="submit"
-                  className="pos-button"
-                  disabled={bulkProductLoading || bulkProductInput.trim().length === 0}
-                >
-                  {bulkProductLoading ? 'Importing…' : 'Import Products'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setBulkProductInput('')}
-                  className="bg-gray-300 text-gray-800 font-semibold py-3 px-6 rounded-lg"
-                  disabled={bulkProductLoading}
-                >
-                  Clear
-                </button>
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h3 className="text-lg font-semibold">Bulk Import Products</h3>
+                <p className="text-sm text-gray-600">
+                  Format: <code className="font-mono bg-gray-100 px-1 py-0.5 rounded">Name, Price, ProductID, Barcode, Category, Active</code>.
+                </p>
               </div>
-            </form>
+              <button
+                type="button"
+                onClick={() => setShowProductImport((prev) => !prev)}
+                className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700 hover:border-camp-500"
+              >
+                {showProductImport ? 'Hide Fields' : 'Show Fields'}
+              </button>
+            </div>
+            {showProductImport ? (
+              <form onSubmit={handleBulkProductSubmit} className="mt-4 space-y-3">
+                <p className="text-xs text-gray-500">
+                  Only name and price are required. Use <code className="font-mono bg-gray-100 px-1 py-0.5 rounded">true</code> or <code className="font-mono bg-gray-100 px-1 py-0.5 rounded">false</code> for the active flag.
+                </p>
+                <textarea
+                  value={bulkProductInput}
+                  onChange={(event) => setBulkProductInput(event.target.value)}
+                  className="pos-input w-full h-32 font-mono text-sm"
+                  placeholder={`Soda, 1.50, PRD_123, 0123456789, Drinks, true\nChips, 2.25`}
+                />
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="submit"
+                    className="pos-button"
+                    disabled={bulkProductLoading || bulkProductInput.trim().length === 0}
+                  >
+                    {bulkProductLoading ? 'Importing…' : 'Import Products'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setBulkProductInput('')}
+                    className="bg-gray-300 text-gray-800 font-semibold py-3 px-6 rounded-lg"
+                    disabled={bulkProductLoading}
+                  >
+                    Clear
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <p className="mt-4 text-sm text-gray-500">
+                Ready to paste a spreadsheet? Use the toggle when you are.
+              </p>
+            )}
           </div>
         </section>
       </div>

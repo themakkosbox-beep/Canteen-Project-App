@@ -88,8 +88,7 @@ const INITIAL_POS_STATE: POSState = {
 export default function POSPage() {
   const [state, setState] = useState<POSState>({ ...INITIAL_POS_STATE });
   const [customerIdInput, setCustomerIdInput] = useState('');
-  const [barcodeInput, setBarcodeInput] = useState('');
-  const [productSearch, setProductSearch] = useState('');
+  const [entryInput, setEntryInput] = useState('');
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [showProductDropdown, setShowProductDropdown] = useState(false);
   const [products, setProducts] = useState<Product[]>([]);
@@ -117,8 +116,9 @@ export default function POSPage() {
   });
   const [creatingLearnProduct, setCreatingLearnProduct] = useState(false);
   const [currentTime, setCurrentTime] = useState(() => new Date());
+  const [deletingTransactionId, setDeletingTransactionId] = useState<string | null>(null);
 
-  const barcodeInputRef = useRef<HTMLInputElement>(null);
+  const entryInputRef = useRef<HTMLInputElement>(null);
 
   const currencyFormatter = useMemo(
     () => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }),
@@ -140,14 +140,15 @@ export default function POSPage() {
     if (!products.length) {
       return [];
     }
-    if (!productSearch.trim()) {
+    const trimmed = entryInput.trim();
+    if (!trimmed) {
       return products.slice(0, 8);
     }
     if (!fuse) {
       return [];
     }
-    return fuse.search(productSearch.trim()).map((result) => result.item).slice(0, 8);
-  }, [productSearch, fuse, products]);
+    return fuse.search(trimmed).map((result) => result.item).slice(0, 8);
+  }, [entryInput, fuse, products]);
 
   const trainingCustomerList = useMemo(
     () =>
@@ -166,7 +167,7 @@ export default function POSPage() {
   useEffect(() => {
     setState({ ...INITIAL_POS_STATE });
     setCustomerIdInput('');
-    setBarcodeInput('');
+    setEntryInput('');
     setDepositAmount('');
     setAdjustmentAmount('');
     setNote('');
@@ -179,8 +180,8 @@ export default function POSPage() {
   }, [trainingMode]);
 
   useEffect(() => {
-    if (state.currentCustomer && barcodeInputRef.current) {
-      barcodeInputRef.current.focus();
+    if (state.currentCustomer && entryInputRef.current) {
+      entryInputRef.current.focus();
     }
   }, [state.currentCustomer]);
 
@@ -276,6 +277,15 @@ export default function POSPage() {
 
   const resolveProductByBarcode = (barcode: string): Product | null => {
     return products.find((product) => product.barcode === barcode) ?? null;
+  };
+
+  const clearEntryInput = () => {
+    setEntryInput('');
+    setSelectedProduct(null);
+    setShowProductDropdown(false);
+    if (entryInputRef.current) {
+      entryInputRef.current.focus();
+    }
   };
 
   const loadCustomer = async (customerId: string) => {
@@ -410,7 +420,7 @@ export default function POSPage() {
         transactions: [transaction, ...current.transactions].slice(0, MAX_TRAINING_TRANSACTIONS),
         autoBalance: current.autoBalance,
       }));
-      setBarcodeInput('');
+      clearEntryInput();
       return;
     }
 
@@ -446,7 +456,7 @@ export default function POSPage() {
       }
 
       await loadCustomer(customerId);
-      setBarcodeInput('');
+      clearEntryInput();
     } catch (error) {
       setState((prev) => ({
         ...prev,
@@ -623,6 +633,74 @@ export default function POSPage() {
     void handlePurchase({ productId: slot.productId });
   };
 
+  const handlePrimaryCharge = () => {
+    if (!state.currentCustomer || state.isLoading) {
+      return;
+    }
+
+    const trimmed = entryInput.trim();
+    if (!trimmed) {
+      return;
+    }
+
+    const barcodeMatch = resolveProductByBarcode(trimmed);
+    if (barcodeMatch) {
+      void handlePurchase({ barcode: trimmed });
+      return;
+    }
+
+    const productMatch = resolveProductById(trimmed);
+    if (productMatch) {
+      setSelectedProduct(productMatch);
+      void handlePurchase({ productId: productMatch.product_id });
+      return;
+    }
+
+    if (selectedProduct) {
+      void handleSelectedProductPurchase();
+      return;
+    }
+
+    setSelectedProduct(null);
+    setShowProductDropdown(true);
+  };
+
+  const handleDeleteTransaction = async (transaction: TransactionLog) => {
+    if (!state.currentCustomer || trainingMode) {
+      return;
+    }
+
+    const id = transaction.transaction_id;
+    if (!id) {
+      setState((prev) => ({ ...prev, error: 'This entry cannot be edited because it is missing an ID.' }));
+      return;
+    }
+
+    setState((prev) => ({ ...prev, error: null }));
+    setDeletingTransactionId(id);
+    try {
+      const response = await fetch(`/api/transactions/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+      });
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(
+          typeof data?.error === 'string' ? data.error : 'Failed to delete transaction'
+        );
+      }
+
+      await loadCustomer(state.currentCustomer.customer_id);
+    } catch (error) {
+      setState((prev) => ({
+        ...prev,
+        error: error instanceof Error ? error.message : 'Failed to delete transaction',
+      }));
+    } finally {
+      setDeletingTransactionId(null);
+    }
+  };
+
   const closeLearnModal = () => {
     if (creatingLearnProduct) {
       return;
@@ -676,8 +754,9 @@ export default function POSPage() {
       await loadProducts();
       await loadQuickKeys();
       setLearnModalState({ open: false, barcode: '', name: '', price: '', category: '', error: null });
-      setProductSearch(product.name);
+      setEntryInput(product.name);
       setSelectedProduct(product);
+      setShowProductDropdown(false);
 
       if (state.currentCustomer) {
         await handlePurchase({ productId: product.product_id });
@@ -783,7 +862,7 @@ export default function POSPage() {
     }
 
     return (
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-4">
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 xl:grid-cols-5">
         {quickKeySlots.map((slot) => renderQuickKey(slot))}
       </div>
     );
@@ -803,7 +882,6 @@ export default function POSPage() {
       currentTime.toLocaleTimeString('en-US', {
         hour: '2-digit',
         minute: '2-digit',
-        second: '2-digit',
       }),
     [currentTime]
   );
@@ -915,36 +993,73 @@ export default function POSPage() {
                 </div>
 
                 <div className="flex w-full flex-1 flex-col gap-3">
-                  <label className="text-sm font-medium text-gray-700" htmlFor="barcode">
-                    Barcode
+                  <label className="text-sm font-medium text-gray-700" htmlFor="charge-input">
+                    Scan Barcode or Search Products
                   </label>
-                  <div className="flex gap-3">
-                    <input
-                      className="w-full rounded-lg border border-gray-300 px-4 py-2 text-lg shadow-sm focus:border-camp-500 focus:outline-none focus:ring-2 focus:ring-camp-200"
-                      id="barcode"
-                      onChange={(event) => setBarcodeInput(event.target.value)}
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter' && barcodeInput.trim()) {
-                          void handlePurchase({ barcode: barcodeInput.trim() });
+                  <div className="relative">
+                    <div className="flex gap-3">
+                      <input
+                        className="w-full rounded-lg border border-gray-300 px-4 py-2 text-lg shadow-sm focus:border-camp-500 focus:outline-none focus:ring-2 focus:ring-camp-200"
+                        id="charge-input"
+                        onBlur={() => setTimeout(() => setShowProductDropdown(false), 150)}
+                        onChange={(event) => {
+                          const value = event.target.value;
+                          setEntryInput(value);
+                          setShowProductDropdown(true);
+                          if (!value.trim()) {
+                            setSelectedProduct(null);
+                          }
+                        }}
+                        onFocus={() => setShowProductDropdown(true)}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') {
+                            event.preventDefault();
+                            handlePrimaryCharge();
+                          }
+                        }}
+                        placeholder={
+                          barcodeLearnMode
+                            ? 'Scan to learn or begin typing to search'
+                            : 'Scan barcode or search by name/ID'
                         }
-                      }}
-                      placeholder={barcodeLearnMode ? 'Scan to learn product' : 'Scan product barcode'}
-                      ref={barcodeInputRef}
-                      value={barcodeInput}
-                    />
-                    <button
-                      className="rounded-lg border border-gray-300 px-4 py-2 font-semibold text-gray-600 shadow hover:border-camp-500"
-                      disabled={!state.currentCustomer || !barcodeInput.trim()}
-                      onClick={() => {
-                        if (barcodeInput.trim()) {
-                          void handlePurchase({ barcode: barcodeInput.trim() });
-                        }
-                      }}
-                      type="button"
-                    >
-                      Charge
-                    </button>
+                        ref={entryInputRef}
+                        value={entryInput}
+                      />
+                      <button
+                        className="rounded-lg border border-gray-300 px-4 py-2 font-semibold text-gray-600 shadow hover:border-camp-500"
+                        disabled={!state.currentCustomer || !entryInput.trim() || state.isLoading}
+                        onClick={handlePrimaryCharge}
+                        type="button"
+                      >
+                        Charge
+                      </button>
+                    </div>
+                    {showProductDropdown && productSuggestions.length ? (
+                      <div
+                        className="absolute z-10 mt-2 max-h-64 w-full overflow-y-auto rounded-lg border border-gray-200 bg-white shadow-lg"
+                        onMouseDown={(event) => event.preventDefault()}
+                      >
+                        {productSuggestions.map((product) => (
+                          <button
+                            key={product.product_id}
+                            className="flex w-full items-center justify-between px-4 py-2 text-left text-sm hover:bg-camp-50"
+                            onClick={() => {
+                              setSelectedProduct(product);
+                              setEntryInput(product.name);
+                              setShowProductDropdown(false);
+                            }}
+                            type="button"
+                          >
+                            <span className="font-medium text-gray-800">{product.name}</span>
+                            <span className="text-gray-500">{formatCurrency(product.price)}</span>
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
                   </div>
+                  <p className="text-sm text-gray-500">
+                    Press Enter to charge a scanned barcode immediately, or pick from the suggestions below.
+                  </p>
                   {barcodeLearnMode ? (
                     <p className="text-sm text-camp-600">
                       Unknown barcodes can be converted into products in one step.
@@ -958,52 +1073,20 @@ export default function POSPage() {
                   Loading products
                 </div>
               ) : (
-                <div className="mt-6">
-                  <label className="text-sm font-medium text-gray-700" htmlFor="product-search">
-                    Search Products
-                  </label>
-                  <div className="relative mt-2">
-                    <input
-                      className="w-full rounded-lg border border-gray-300 px-4 py-2 text-lg shadow-sm focus:border-camp-500 focus:outline-none focus:ring-2 focus:ring-camp-200"
-                      id="product-search"
-                      onBlur={() => setTimeout(() => setShowProductDropdown(false), 150)}
-                      onChange={(event) => {
-                        setProductSearch(event.target.value);
-                        setShowProductDropdown(true);
-                      }}
-                      onFocus={() => setShowProductDropdown(true)}
-                      placeholder="Search by name or ID"
-                      value={productSearch}
-                    />
-                    {showProductDropdown && productSuggestions.length ? (
-                      <div className="absolute z-10 mt-2 max-h-64 w-full overflow-y-auto rounded-lg border border-gray-200 bg-white shadow-lg">
-                        {productSuggestions.map((product) => (
-                          <button
-                            key={product.product_id}
-                            className="flex w-full items-center justify-between px-4 py-2 text-left text-sm hover:bg-camp-50"
-                            onClick={() => {
-                              setSelectedProduct(product);
-                              setProductSearch(product.name);
-                              setShowProductDropdown(false);
-                            }}
-                            type="button"
-                          >
-                            <span className="font-medium text-gray-800">{product.name}</span>
-                            <span className="text-gray-500">{formatCurrency(product.price)}</span>
-                          </button>
-                        ))}
-                      </div>
+                <div className="mt-6 space-y-4">
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
+                    <span>Quick filters:</span>
+                    {categories.length === 0 ? (
+                      <span className="text-gray-400">No categories yet.</span>
                     ) : null}
-                  </div>
-                  <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-gray-500">
-                    <span>Categories:</span>
                     {categories.map((category) => (
                       <button
                         key={category}
                         className="rounded-full border border-gray-200 px-3 py-1 hover:border-camp-500 hover:text-camp-600"
                         onClick={() => {
-                          setProductSearch(category);
+                          setEntryInput(category);
                           setShowProductDropdown(true);
+                          setTimeout(() => entryInputRef.current?.focus(), 0);
                         }}
                         type="button"
                       >
@@ -1011,26 +1094,36 @@ export default function POSPage() {
                       </button>
                     ))}
                   </div>
-                  <div className="mt-4 flex gap-3">
-                    <button
-                      className="rounded-lg bg-camp-600 px-4 py-2 font-semibold text-white shadow hover:bg-camp-700"
-                      disabled={!selectedProduct || !state.currentCustomer || state.isLoading}
-                      onClick={handleSelectedProductPurchase}
-                      type="button"
-                    >
-                      Charge Selected ({selectedProduct ? formatCurrency(selectedProduct.price) : '-'})
-                    </button>
-                    <button
-                      className="rounded-lg border border-gray-300 px-4 py-2 font-semibold text-gray-600 shadow hover:border-camp-500"
-                      disabled={!state.currentCustomer}
-                      onClick={() => {
-                        setSelectedProduct(null);
-                        setProductSearch('');
-                      }}
-                      type="button"
-                    >
-                      Clear
-                    </button>
+                  <div className="flex flex-col gap-3 rounded-lg border border-gray-200 bg-gray-50 p-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <p className="text-sm font-semibold text-gray-800">
+                        {selectedProduct ? selectedProduct.name : 'No product selected'}
+                      </p>
+                      <p className="text-xs text-gray-500">
+                        {selectedProduct
+                          ? `Price: ${formatCurrency(selectedProduct.price)}`
+                          : 'Use a suggestion, filter, or quick key to pick an item.'}
+                      </p>
+                    </div>
+                    <div className="flex flex-1 flex-col gap-2 sm:flex-row sm:justify-end">
+                      <button
+                        className="rounded-lg bg-camp-600 px-4 py-2 font-semibold text-white shadow hover:bg-camp-700"
+                        disabled={!selectedProduct || !state.currentCustomer || state.isLoading}
+                        onClick={handleSelectedProductPurchase}
+                        type="button"
+                      >
+                        Charge Selected
+                        {selectedProduct ? ` (${formatCurrency(selectedProduct.price)})` : ''}
+                      </button>
+                      <button
+                        className="rounded-lg border border-gray-300 px-4 py-2 font-semibold text-gray-600 shadow hover:border-camp-500"
+                        disabled={state.isLoading}
+                        onClick={clearEntryInput}
+                        type="button"
+                      >
+                        Clear
+                      </button>
+                    </div>
                   </div>
                 </div>
               )}
@@ -1078,7 +1171,7 @@ export default function POSPage() {
                     onClick={() => {
                       setState({ ...INITIAL_POS_STATE });
                       setCustomerIdInput('');
-                      setBarcodeInput('');
+                      clearEntryInput();
                     }}
                     type="button"
                   >
@@ -1290,45 +1383,69 @@ export default function POSPage() {
                   Export CSV
                 </button>
               </div>
+              {trainingMode ? (
+                <p className="mt-2 text-xs text-gray-500">
+                  Editing is disabled in training mode. Switch back to live mode to void transactions.
+                </p>
+              ) : null}
 
               {state.recentTransactions.length ? (
                 <div className="mt-4 space-y-3">
-                  {filteredTransactions.map((transaction) => (
-                    <div
-                      key={transaction.id}
-                      className="rounded-lg border border-gray-200 bg-gray-50 p-4"
-                    >
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <p className="text-sm font-semibold text-gray-800">
-                            {transaction.type === 'purchase'
-                              ? transaction.product_name ?? 'Purchase'
-                              : transaction.type === 'deposit'
-                              ? 'Deposit'
-                              : 'Adjustment'}
-                          </p>
-                          {transaction.note ? (
-                            <p className="text-xs text-gray-500">{transaction.note}</p>
-                          ) : null}
+                  {filteredTransactions.map((transaction) => {
+                    const amountPositive = transaction.amount >= 0;
+                    const canDelete = !trainingMode && Boolean(transaction.transaction_id);
+                    const isDeleting =
+                      canDelete && deletingTransactionId === transaction.transaction_id;
+
+                    return (
+                      <div
+                        key={transaction.id}
+                        className="rounded-lg border border-gray-200 bg-gray-50 p-4"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-semibold text-gray-800">
+                              {transaction.type === 'purchase'
+                                ? transaction.product_name ?? 'Purchase'
+                                : transaction.type === 'deposit'
+                                ? 'Deposit'
+                                : 'Adjustment'}
+                            </p>
+                            {transaction.note ? (
+                              <p className="text-xs text-gray-500">{transaction.note}</p>
+                            ) : null}
+                          </div>
+                          <div className="flex flex-col items-end gap-2 text-right sm:flex-row sm:items-center sm:gap-3">
+                            <span
+                              className={`text-sm font-semibold ${
+                                amountPositive ? 'text-camp-600' : 'text-red-600'
+                              }`}
+                            >
+                              {amountPositive
+                                ? `+${formatCurrency(transaction.amount)}`
+                                : `-${formatCurrency(Math.abs(transaction.amount))}`}
+                            </span>
+                            {canDelete ? (
+                              <button
+                                className="rounded-full border border-gray-300 px-3 py-1 text-xs font-semibold text-gray-600 shadow-sm hover:border-red-400 hover:text-red-600"
+                                disabled={isDeleting || state.isLoading}
+                                onClick={() => handleDeleteTransaction(transaction)}
+                                type="button"
+                              >
+                                {isDeleting ? 'Removing…' : 'Void'}
+                              </button>
+                            ) : null}
+                          </div>
                         </div>
-                        <span
-                          className={`text-sm font-semibold ${
-                            transaction.amount < 0 ? 'text-red-600' : 'text-camp-600'
-                          }`}
-                        >
-                          {transaction.amount < 0
-                            ? `-${formatCurrency(Math.abs(transaction.amount))}`
-                            : `+${formatCurrency(transaction.amount)}`}
-                        </span>
+                        <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-gray-500">
+                          <span>{new Date(transaction.timestamp).toLocaleDateString()}</span>
+                          <span>{formatTime(transaction.timestamp)}</span>
+                          <span>Balance: {formatCurrency(transaction.balance_after)}</span>
+                          {transaction.staff_id ? <span>Staff: {transaction.staff_id}</span> : null}
+                        </div>
                       </div>
-                      <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-gray-500">
-                        <span>{new Date(transaction.timestamp).toLocaleDateString()}</span>
-                        <span>{formatTime(transaction.timestamp)}</span>
-                        <span>Balance: {formatCurrency(transaction.balance_after)}</span>
-                        {transaction.staff_id ? <span>Staff: {transaction.staff_id}</span> : null}
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               ) : (
                 <div className="mt-4 rounded-lg border border-dashed border-gray-300 p-4 text-center text-gray-500">

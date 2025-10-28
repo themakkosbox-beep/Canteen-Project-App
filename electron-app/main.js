@@ -1,5 +1,6 @@
 'use strict';
 
+const fs = require('fs');
 const { app, BrowserWindow, dialog } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const path = require('path');
@@ -10,6 +11,7 @@ const isDev = process.env.NODE_ENV === 'development';
 const NEXT_PORT = Number(process.env.NEXT_PORT ?? 3000);
 const NEXT_HOST = process.env.NEXT_HOST ?? '127.0.0.1';
 let nextProcess;
+let dataDirectory = null;
 
 function getNpmCommand() {
   return process.platform === 'win32' ? 'npm.cmd' : 'npm';
@@ -144,6 +146,17 @@ function registerAutoUpdater(mainWindow) {
 
 async function bootstrap() {
   try {
+    if (!isDev) {
+      const userData = app.getPath('userData');
+      dataDirectory = path.join(userData, 'data');
+      try {
+        fs.mkdirSync(dataDirectory, { recursive: true });
+      } catch (error) {
+        console.error('Failed to ensure data directory', error);
+      }
+      process.env.CANTEEN_DATA_DIR = dataDirectory;
+    }
+
     await startNextServer();
     const window = createWindow();
     registerAutoUpdater(window);
