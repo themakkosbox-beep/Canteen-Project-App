@@ -3,6 +3,8 @@ export interface Customer {
   customer_id: string; // 4-digit code
   name?: string; // Optional name
   balance: number;
+  discount_percent?: number;
+  discount_flat?: number;
   created_at: string;
   updated_at: string;
 }
@@ -15,6 +17,8 @@ export interface Product {
   barcode?: string;
   category?: string;
   active: boolean;
+  discount_percent?: number;
+  discount_flat?: number;
   created_at: string;
   updated_at: string;
   options_json?: string | null;
@@ -24,6 +28,7 @@ export interface Product {
 export interface ProductOptionChoice {
   id: string;
   label: string;
+  priceDelta?: number;
 }
 
 export interface ProductOptionGroup {
@@ -32,6 +37,24 @@ export interface ProductOptionGroup {
   required: boolean;
   multiple: boolean;
   choices: ProductOptionChoice[];
+}
+
+export interface ProductOptionSelection {
+  groupId: string;
+  choiceIds: string[];
+}
+
+export interface TransactionOptionSelection {
+  groupId: string;
+  groupName: string;
+  multiple: boolean;
+  required: boolean;
+  choices: Array<{
+    id: string;
+    label: string;
+    priceDelta: number;
+  }>;
+  delta: number;
 }
 
 export interface QuickKeySlot {
@@ -65,6 +88,11 @@ export interface Transaction {
   note?: string; // Optional note
   timestamp: string;
   staff_id?: string; // For future use
+  options_json?: string | null;
+  voided?: boolean;
+  voided_at?: string | null;
+  void_note?: string | null;
+  options?: TransactionOptionSelection[];
 }
 
 export interface TransactionLog extends Transaction {

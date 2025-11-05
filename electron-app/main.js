@@ -10,6 +10,7 @@ const waitOn = require('wait-on');
 const isDev = process.env.NODE_ENV === 'development';
 const NEXT_PORT = Number(process.env.NEXT_PORT ?? 3000);
 const NEXT_HOST = process.env.NEXT_HOST ?? '127.0.0.1';
+const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 let nextProcess;
 let dataDirectory = null;
 
@@ -103,6 +104,51 @@ function registerAutoUpdater(mainWindow) {
     return;
   }
 
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+
+  let updateCheckTimer = null;
+  let checkingForUpdates = false;
+
+  const scheduleUpdateChecks = () => {
+    if (updateCheckTimer) {
+      clearInterval(updateCheckTimer);
+    }
+
+    updateCheckTimer = setInterval(() => {
+      if (checkingForUpdates) {
+        return;
+      }
+
+      checkingForUpdates = true;
+      autoUpdater
+        .checkForUpdates()
+        .catch((error) => {
+          console.error('Failed to check for updates:', error);
+        })
+        .finally(() => {
+          checkingForUpdates = false;
+        });
+    }, UPDATE_CHECK_INTERVAL_MS);
+  };
+
+  const runInitialUpdateCheck = () => {
+    if (checkingForUpdates) {
+      return;
+    }
+
+    checkingForUpdates = true;
+    autoUpdater
+      .checkForUpdates()
+      .catch((error) => {
+        console.error('Failed to check for updates:', error);
+      })
+      .finally(() => {
+        checkingForUpdates = false;
+        scheduleUpdateChecks();
+      });
+  };
+
   autoUpdater.on('update-available', () => {
     dialog.showMessageBox(mainWindow, {
       type: 'info',
@@ -120,28 +166,36 @@ function registerAutoUpdater(mainWindow) {
   });
 
   autoUpdater.on('update-downloaded', () => {
+    if (updateCheckTimer) {
+      clearInterval(updateCheckTimer);
+      updateCheckTimer = null;
+    }
+
     dialog
       .showMessageBox(mainWindow, {
-        type: 'question',
-        buttons: ['Restart Now', 'Later'],
+        type: 'info',
+        buttons: ['Restart Now'],
         defaultId: 0,
-        cancelId: 1,
+        cancelId: 0,
         title: 'Update Ready',
-        message: 'An update has been downloaded. Restart now to apply it?',
-      })
-      .then((result) => {
-        if (result.response === 0) {
-          autoUpdater.quitAndInstall();
-        }
+        message: 'An update has been downloaded. The app will restart to finish installing.',
       })
       .catch((error) => {
-        console.error('Failed to prompt for update restart:', error);
+        console.error('Failed to display update notification:', error);
+      })
+      .finally(() => {
+        autoUpdater.quitAndInstall();
       });
   });
 
-  autoUpdater.checkForUpdatesAndNotify().catch((error) => {
-    console.error('Failed to check for updates:', error);
+  mainWindow.on('closed', () => {
+    if (updateCheckTimer) {
+      clearInterval(updateCheckTimer);
+      updateCheckTimer = null;
+    }
   });
+
+  runInitialUpdateCheck();
 }
 
 async function bootstrap() {

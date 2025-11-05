@@ -1,7 +1,13 @@
 'use client';
 
 import React, { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
-import { Customer, Product, QuickKeySlot, TransactionExportRow } from '@/types/database';
+import type {
+  Customer,
+  Product,
+  ProductOptionGroup,
+  QuickKeySlot,
+  TransactionExportRow,
+} from '@/types/database';
 
 interface CustomerFormState {
   customerId: string;
@@ -16,12 +22,15 @@ interface ProductFormState {
   barcode: string;
   category: string;
   active: boolean;
+  discountPercent: string;
+  discountFlat: string;
   options: ProductOptionGroupState[];
 }
 
 interface ProductOptionChoiceState {
   id: string;
   label: string;
+  priceDelta: string;
 }
 
 interface ProductOptionGroupState {
@@ -40,6 +49,23 @@ const createEmptyQuickKeySlots = (): QuickKeySlot[] =>
     productId: null,
     product: null,
   }));
+
+const generateId = (): string => {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+
+  return `id-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
+};
+
+const formatOptionalNumberInput = (value?: number | null): string => {
+  if (value === undefined || value === null) {
+    return '';
+  }
+
+  const rounded = Math.round(value * 100) / 100;
+  return rounded.toString();
+};
 
 const escapeCsvValue = (value: unknown): string => {
   if (value === null || value === undefined) {
@@ -91,6 +117,8 @@ export default function AdminPage() {
     barcode: '',
     category: '',
     active: true,
+    discountPercent: '',
+    discountFlat: '',
     options: [],
   });
 
@@ -199,11 +227,40 @@ export default function AdminPage() {
         body: JSON.stringify({ productIds: quickKeySlots.map((slot) => slot.productId) }),
       });
 
-      const payload = await response.json();
-      if (!response.ok) {
-        throw new Error(payload?.error ?? 'Failed to save quick key settings');
+      const contentType = response.headers.get('content-type') ?? '';
+      const isJson = contentType.includes('application/json');
+
+      let parsedPayload: unknown = null;
+      let fallbackText: string | null = null;
+
+      if (isJson) {
+        try {
+          parsedPayload = await response.json();
+        } catch (parseError) {
+          console.error('Failed to parse quick key response payload as JSON', parseError);
+          parsedPayload = null;
+        }
+      } else {
+        fallbackText = await response.text();
       }
 
+      if (!response.ok) {
+        const extractedError =
+          typeof parsedPayload === 'object' && parsedPayload !== null && 'error' in parsedPayload
+            ? (parsedPayload as { error?: unknown }).error
+            : fallbackText;
+        const message =
+          typeof extractedError === 'string' && extractedError.trim().length > 0
+            ? extractedError.trim()
+            : 'Failed to save quick key settings';
+        throw new Error(message);
+      }
+
+      if (!isJson || typeof parsedPayload !== 'object' || parsedPayload === null) {
+        throw new Error('Unexpected response format while saving quick key settings');
+      }
+
+      const payload = parsedPayload as { slots?: unknown };
       const normalized = createEmptyQuickKeySlots();
       const slots: unknown = payload?.slots;
       if (Array.isArray(slots)) {
@@ -500,6 +557,7 @@ export default function AdminPage() {
   const handleProductSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setError(null);
+    setSuccess(null);
 
     const trimmedName = productForm.name.trim();
     if (trimmedName.length === 0) {
@@ -513,19 +571,97 @@ export default function AdminPage() {
       return;
     }
 
+    const discountPercentInput = productForm.discountPercent.trim();
+    let normalizedDiscountPercent: number | undefined;
+    if (discountPercentInput.length > 0) {
+      const parsed = Number.parseFloat(discountPercentInput);
+      if (!Number.isFinite(parsed) || parsed < 0 || parsed > 100) {
+        setError('Discount percent must be between 0 and 100');
+        return;
+      }
+      normalizedDiscountPercent = Math.round(parsed * 100) / 100;
+    }
+
+    const discountFlatInput = productForm.discountFlat.trim();
+    let normalizedDiscountFlat: number | undefined;
+    if (discountFlatInput.length > 0) {
+      const parsed = Number.parseFloat(discountFlatInput);
+      if (!Number.isFinite(parsed) || parsed < 0) {
+        setError('Discount amount must be zero or a positive number');
+        return;
+      }
+      normalizedDiscountFlat = Math.round(parsed * 100) / 100;
+    }
+
+    const sanitizedOptions: ProductOptionGroup[] = [];
+    for (const group of productForm.options) {
+      const groupName = group.name.trim();
+      if (groupName.length === 0) {
+        setError('Option group names cannot be blank');
+        return;
+      }
+
+      const sanitizedChoices: ProductOptionGroup['choices'] = [];
+      for (const choice of group.choices) {
+        const label = choice.label.trim();
+        if (label.length === 0) {
+          continue;
+        }
+
+        const priceInput = choice.priceDelta.trim();
+        let priceDelta: number | undefined;
+        if (priceInput.length > 0) {
+          const parsedDelta = Number.parseFloat(priceInput);
+          if (!Number.isFinite(parsedDelta)) {
+            setError('Each option price adjustment must be numeric');
+            return;
+          }
+          priceDelta = Math.round(parsedDelta * 100) / 100;
+        }
+
+        sanitizedChoices.push({
+          id: choice.id || generateId(),
+          label,
+          priceDelta,
+        });
+      }
+
+      if (sanitizedChoices.length === 0) {
+        setError(`Option group "${groupName}" needs at least one choice`);
+        return;
+      }
+
+      sanitizedOptions.push({
+        id: group.id || generateId(),
+        name: groupName,
+        required: group.required,
+        multiple: group.multiple,
+        choices: sanitizedChoices,
+      });
+    }
+
+    const trimmedBarcode = productForm.barcode.trim();
+    const trimmedCategory = productForm.category.trim();
+
+    const basePayload = {
+      name: trimmedName,
+      price: parsedPrice,
+      barcode: trimmedBarcode.length > 0 ? trimmedBarcode : null,
+      category: trimmedCategory.length > 0 ? trimmedCategory : null,
+      active: productForm.active,
+      options: sanitizedOptions,
+      discountPercent:
+        normalizedDiscountPercent === undefined ? null : normalizedDiscountPercent,
+      discountFlat:
+        normalizedDiscountFlat === undefined ? null : normalizedDiscountFlat,
+    };
+
     try {
       if (editingProductId) {
         const response = await fetch(`/api/products/${editingProductId}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            name: trimmedName,
-            price: parsedPrice,
-            barcode: productForm.barcode.trim() || null,
-            category: productForm.category.trim() || null,
-            active: productForm.active,
-            options: productForm.options,
-          }),
+          body: JSON.stringify(basePayload),
         });
 
         if (!response.ok) {
@@ -539,13 +675,8 @@ export default function AdminPage() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
+            ...basePayload,
             productId: productForm.productId.trim() || undefined,
-            name: trimmedName,
-            price: parsedPrice,
-            barcode: productForm.barcode.trim() || undefined,
-            category: productForm.category.trim() || undefined,
-            active: productForm.active,
-            options: productForm.options,
           }),
         });
 
@@ -564,6 +695,8 @@ export default function AdminPage() {
         barcode: '',
         category: '',
         active: true,
+        discountPercent: '',
+        discountFlat: '',
         options: [],
       });
       setEditingProductId(null);
@@ -594,17 +727,32 @@ export default function AdminPage() {
     setProductForm({
       productId: product.product_id,
       name: product.name,
-      price: product.price.toString(),
+      price: formatOptionalNumberInput(product.price),
       barcode: product.barcode ?? '',
       category: product.category ?? '',
       active: product.active,
+      discountPercent:
+        product.discount_percent && product.discount_percent > 0
+          ? formatOptionalNumberInput(product.discount_percent)
+          : '',
+      discountFlat:
+        product.discount_flat && product.discount_flat > 0
+          ? formatOptionalNumberInput(product.discount_flat)
+          : '',
       options:
         product.options?.map((group) => ({
           id: group.id,
           name: group.name,
           required: group.required,
           multiple: group.multiple,
-          choices: group.choices.map((choice) => ({ id: choice.id, label: choice.label })),
+          choices: group.choices.map((choice) => ({
+            id: choice.id,
+            label: choice.label,
+            priceDelta:
+              choice.priceDelta && choice.priceDelta !== 0
+                ? formatOptionalNumberInput(choice.priceDelta)
+                : '',
+          })),
         })) ?? [],
     });
     setEditingProductId(product.product_id);
@@ -619,8 +767,103 @@ export default function AdminPage() {
       barcode: '',
       category: '',
       active: true,
+      discountPercent: '',
+      discountFlat: '',
       options: [],
     });
+  };
+
+  const updateOptionGroup = (
+    groupId: string,
+    updater: (group: ProductOptionGroupState) => ProductOptionGroupState
+  ) => {
+    setProductForm((previous) => ({
+      ...previous,
+      options: previous.options.map((group) =>
+        group.id === groupId ? updater(group) : group
+      ),
+    }));
+  };
+
+  const handleAddOptionGroup = () => {
+    setProductForm((previous) => ({
+      ...previous,
+      options: [
+        ...previous.options,
+        {
+          id: generateId(),
+          name: '',
+          required: false,
+          multiple: false,
+          choices: [{ id: generateId(), label: '', priceDelta: '' }],
+        },
+      ],
+    }));
+  };
+
+  const handleRemoveOptionGroup = (groupId: string) => {
+    setProductForm((previous) => ({
+      ...previous,
+      options: previous.options.filter((group) => group.id !== groupId),
+    }));
+  };
+
+  const handleOptionGroupNameChange = (groupId: string, name: string) => {
+    updateOptionGroup(groupId, (group) => ({ ...group, name }));
+  };
+
+  const handleOptionGroupToggleRequired = (groupId: string, required: boolean) => {
+    updateOptionGroup(groupId, (group) => ({ ...group, required }));
+  };
+
+  const handleOptionGroupToggleMultiple = (groupId: string, multiple: boolean) => {
+    updateOptionGroup(groupId, (group) => ({ ...group, multiple }));
+  };
+
+  const handleAddOptionChoice = (groupId: string) => {
+    updateOptionGroup(groupId, (group) => ({
+      ...group,
+      choices: [...group.choices, { id: generateId(), label: '', priceDelta: '' }],
+    }));
+  };
+
+  const handleRemoveOptionChoice = (groupId: string, choiceId: string) => {
+    updateOptionGroup(groupId, (group) => {
+      const remaining = group.choices.filter((choice) => choice.id !== choiceId);
+      return {
+        ...group,
+        choices:
+          remaining.length > 0
+            ? remaining
+            : [{ id: generateId(), label: '', priceDelta: '' }],
+      };
+    });
+  };
+
+  const handleOptionChoiceLabelChange = (
+    groupId: string,
+    choiceId: string,
+    label: string
+  ) => {
+    updateOptionGroup(groupId, (group) => ({
+      ...group,
+      choices: group.choices.map((choice) =>
+        choice.id === choiceId ? { ...choice, label } : choice
+      ),
+    }));
+  };
+
+  const handleOptionChoicePriceChange = (
+    groupId: string,
+    choiceId: string,
+    priceDelta: string
+  ) => {
+    updateOptionGroup(groupId, (group) => ({
+      ...group,
+      choices: group.choices.map((choice) =>
+        choice.id === choiceId ? { ...choice, priceDelta } : choice
+      ),
+    }));
   };
 
   const buildFailureSummary = (
@@ -810,24 +1053,59 @@ export default function AdminPage() {
     }
   };
 
-    const currencyFormatter = useMemo(
-      () => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }),
-      []
-    );
+  const currencyFormatter = useMemo(
+    () => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }),
+    []
+  );
 
-    const quickKeyOptions = useMemo(() => {
-      const map = new Map<string, Product>();
-      products.forEach((product) => map.set(product.product_id, product));
-      quickKeySlots.forEach((slot) => {
-        if (slot.product) {
-          map.set(slot.product.product_id, slot.product);
-        }
-      });
-      return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
-    }, [products, quickKeySlots]);
+  const quickKeyOptions = useMemo(() => {
+    const map = new Map<string, Product>();
+    products.forEach((product) => map.set(product.product_id, product));
+    quickKeySlots.forEach((slot) => {
+      if (slot.product) {
+        map.set(slot.product.product_id, slot.product);
+      }
+    });
+    return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
+  }, [products, quickKeySlots]);
 
   const customerCount = useMemo(() => customers.length, [customers]);
   const productCount = useMemo(() => products.length, [products]);
+
+  const describeProductDiscount = (product: Product): string => {
+    const pieces: string[] = [];
+    const percent = product.discount_percent ?? 0;
+    if (percent > 0) {
+      const rounded = Math.round(percent * 100) / 100;
+      pieces.push(`${rounded.toString()}% off`);
+    }
+
+    const flat = product.discount_flat ?? 0;
+    if (flat > 0) {
+      pieces.push(`${currencyFormatter.format(flat)} off`);
+    }
+
+    if (pieces.length === 0) {
+      return '—';
+    }
+
+    return pieces.join(' + ');
+  };
+
+  const summarizeOptionGroups = (product: Product): string => {
+    const groups = product.options ?? [];
+    if (groups.length === 0) {
+      return '—';
+    }
+
+    const requiredCount = groups.filter((group) => group.required).length;
+    const label = `${groups.length} group${groups.length === 1 ? '' : 's'}`;
+    if (requiredCount === 0) {
+      return label;
+    }
+
+    return `${label} (${requiredCount} required)`;
+  };
 
   return (
     <div className="min-h-screen bg-gray-100 py-8">
@@ -1075,10 +1353,7 @@ export default function AdminPage() {
                         <td className="py-2 px-2 font-semibold">#{customer.customer_id}</td>
                         <td className="py-2 px-2">{customer.name ?? '—'}</td>
                         <td className="py-2 px-2 text-right">
-                          {new Intl.NumberFormat('en-US', {
-                            style: 'currency',
-                            currency: 'USD',
-                          }).format(customer.balance)}
+                          {currencyFormatter.format(customer.balance)}
                         </td>
                         <td className="py-2 px-2 text-sm text-gray-500">
                           {new Date(customer.updated_at).toLocaleString()}
@@ -1166,9 +1441,9 @@ export default function AdminPage() {
           </div>
           <form
             onSubmit={handleProductSubmit}
-            className="grid grid-cols-1 md:grid-cols-5 gap-4 items-end"
+            className="grid grid-cols-1 gap-4 items-end md:grid-cols-6"
           >
-            <div>
+            <div className="md:col-span-3">
               <label className="block text-sm font-medium text-gray-700">Name</label>
               <input
                 type="text"
@@ -1181,7 +1456,7 @@ export default function AdminPage() {
                 required
               />
             </div>
-            <div>
+            <div className="md:col-span-1">
               <label className="block text-sm font-medium text-gray-700">Price</label>
               <input
                 type="number"
@@ -1196,19 +1471,36 @@ export default function AdminPage() {
                 required
               />
             </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700">Barcode</label>
+            <div className="md:col-span-1">
+              <label className="block text-sm font-medium text-gray-700">Discount (%)</label>
               <input
-                type="text"
-                value={productForm.barcode}
+                type="number"
+                min="0"
+                max="100"
+                step="0.01"
+                value={productForm.discountPercent}
                 onChange={(event) =>
-                  setProductForm((prev) => ({ ...prev, barcode: event.target.value }))
+                  setProductForm((prev) => ({ ...prev, discountPercent: event.target.value }))
                 }
                 className="pos-input w-full mt-1"
-                placeholder="Scan or type (optional)"
+                placeholder="10"
               />
             </div>
-            <div>
+            <div className="md:col-span-1">
+              <label className="block text-sm font-medium text-gray-700">Discount ($)</label>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={productForm.discountFlat}
+                onChange={(event) =>
+                  setProductForm((prev) => ({ ...prev, discountFlat: event.target.value }))
+                }
+                className="pos-input w-full mt-1"
+                placeholder="0.50"
+              />
+            </div>
+            <div className="md:col-span-2">
               <label className="block text-sm font-medium text-gray-700">Category</label>
               <input
                 type="text"
@@ -1220,7 +1512,19 @@ export default function AdminPage() {
                 placeholder="Snacks, Drinks, etc."
               />
             </div>
-            <div>
+            <div className="md:col-span-2">
+              <label className="block text-sm font-medium text-gray-700">Barcode</label>
+              <input
+                type="text"
+                value={productForm.barcode}
+                onChange={(event) =>
+                  setProductForm((prev) => ({ ...prev, barcode: event.target.value }))
+                }
+                className="pos-input w-full mt-1"
+                placeholder="Scan or type (optional)"
+              />
+            </div>
+            <div className="md:col-span-2">
               <label className="block text-sm font-medium text-gray-700">Product ID</label>
               <input
                 type="text"
@@ -1233,7 +1537,7 @@ export default function AdminPage() {
                 disabled={Boolean(editingProductId)}
               />
             </div>
-            <div className="flex items-center space-x-2 md:col-span-5">
+            <div className="flex items-center space-x-2 md:col-span-6">
               <input
                 id="product-active-checkbox"
                 type="checkbox"
@@ -1247,13 +1551,132 @@ export default function AdminPage() {
                 Active
               </label>
             </div>
-            <div className="md:col-span-5">
+            <div className="md:col-span-6 border border-gray-200 rounded-lg p-4 space-y-4">
+              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <h3 className="text-base font-semibold text-gray-800">Option Groups</h3>
+                  <p className="text-sm text-gray-600">
+                    Configure required or optional selections like sides, toppings, or sizes.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleAddOptionGroup}
+                  className="pos-button w-full md:w-auto"
+                >
+                  Add Option Group
+                </button>
+              </div>
+              {productForm.options.length === 0 ? (
+                <p className="rounded-lg border border-dashed border-gray-300 p-4 text-sm text-gray-500">
+                  No option groups yet. Add one to support choices—perfect for meals like a chicken sandwich with different sides.
+                </p>
+              ) : (
+                <div className="space-y-4">
+                  {productForm.options.map((group) => (
+                    <div key={group.id} className="rounded-lg border border-gray-200 bg-gray-50 p-4 space-y-4">
+                      <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+                        <div className="md:flex-1">
+                          <label className="block text-sm font-medium text-gray-700">Group Name</label>
+                          <input
+                            type="text"
+                            value={group.name}
+                            onChange={(event) => handleOptionGroupNameChange(group.id, event.target.value)}
+                            className="pos-input w-full mt-1"
+                            placeholder="Combo Options"
+                          />
+                        </div>
+                        <div className="flex flex-wrap items-center gap-4">
+                          <label className="flex items-center gap-2 text-sm text-gray-700">
+                            <input
+                              type="checkbox"
+                              checked={group.required}
+                              onChange={(event) => handleOptionGroupToggleRequired(group.id, event.target.checked)}
+                              className="h-4 w-4"
+                            />
+                            Required
+                          </label>
+                          <label className="flex items-center gap-2 text-sm text-gray-700">
+                            <input
+                              type="checkbox"
+                              checked={group.multiple}
+                              onChange={(event) => handleOptionGroupToggleMultiple(group.id, event.target.checked)}
+                              className="h-4 w-4"
+                            />
+                            Allow multiple
+                          </label>
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveOptionGroup(group.id)}
+                            className="text-sm font-semibold text-red-600 hover:underline"
+                          >
+                            Remove group
+                          </button>
+                        </div>
+                      </div>
+                      <div className="space-y-3">
+                        {group.choices.map((choice) => (
+                          <div
+                            key={choice.id}
+                            className="grid grid-cols-1 gap-3 md:grid-cols-10 md:items-end"
+                          >
+                            <div className="md:col-span-6">
+                              <label className="block text-sm font-medium text-gray-700">Choice Label</label>
+                              <input
+                                type="text"
+                                value={choice.label}
+                                onChange={(event) =>
+                                  handleOptionChoiceLabelChange(group.id, choice.id, event.target.value)
+                                }
+                                className="pos-input w-full mt-1"
+                                placeholder="Fries"
+                              />
+                            </div>
+                            <div className="md:col-span-3">
+                              <label className="block text-sm font-medium text-gray-700">Price Adjustment</label>
+                              <input
+                                type="number"
+                                step="0.01"
+                                value={choice.priceDelta}
+                                onChange={(event) =>
+                                  handleOptionChoicePriceChange(group.id, choice.id, event.target.value)
+                                }
+                                className="pos-input w-full mt-1"
+                                placeholder="0.00"
+                              />
+                              <p className="text-xs text-gray-500 mt-1">Use negative values for discounts.</p>
+                            </div>
+                            <div className="md:col-span-1 md:text-right">
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveOptionChoice(group.id, choice.id)}
+                                className="text-sm font-semibold text-red-600 hover:underline"
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                        <button
+                          type="button"
+                          onClick={() => handleAddOptionChoice(group.id)}
+                          className="rounded-lg border border-camp-500 px-3 py-2 text-sm font-semibold text-camp-600 hover:bg-camp-50"
+                        >
+                          Add Choice
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="md:col-span-6">
               <button type="submit" className="pos-button w-full md:w-auto">
                 {editingProductId ? 'Update Product' : 'Save Product'}
               </button>
             </div>
             {editingProductId && (
-              <div className="md:col-span-5">
+              <div className="md:col-span-6">
                 <button
                   type="button"
                   onClick={cancelProductEdit}
@@ -1325,6 +1748,8 @@ export default function AdminPage() {
                     <tr className="border-b border-gray-200">
                       <th className="text-left py-2 px-2">Name</th>
                       <th className="text-right py-2 px-2">Price</th>
+                      <th className="text-left py-2 px-2">Discount</th>
+                      <th className="text-left py-2 px-2">Options</th>
                       <th className="text-left py-2 px-2">Barcode</th>
                       <th className="text-left py-2 px-2">Category</th>
                       <th className="text-left py-2 px-2">Status</th>
@@ -1340,11 +1765,10 @@ export default function AdminPage() {
                           <span className="block text-xs text-gray-500">{product.product_id}</span>
                         </td>
                         <td className="py-2 px-2 text-right">
-                          {new Intl.NumberFormat('en-US', {
-                            style: 'currency',
-                            currency: 'USD',
-                          }).format(product.price)}
+                          {currencyFormatter.format(product.price)}
                         </td>
+                        <td className="py-2 px-2">{describeProductDiscount(product)}</td>
+                        <td className="py-2 px-2">{summarizeOptionGroups(product)}</td>
                         <td className="py-2 px-2">{product.barcode ?? '—'}</td>
                         <td className="py-2 px-2">{product.category ?? '—'}</td>
                         <td className="py-2 px-2">

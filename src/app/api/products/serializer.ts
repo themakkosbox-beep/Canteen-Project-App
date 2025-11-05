@@ -18,6 +18,19 @@ export const serializeProduct = (product: Product): SerializedProduct => {
     }
   }
 
+  if (options) {
+    options = options.map((group) => ({
+      ...group,
+      choices: group.choices.map((choice) => ({
+        ...choice,
+        priceDelta:
+          typeof choice.priceDelta === 'number' && Number.isFinite(choice.priceDelta)
+            ? choice.priceDelta
+            : 0,
+      })),
+    }));
+  }
+
   const { options_json: unusedOptionsJson, ...rest } = product;
   void unusedOptionsJson;
 

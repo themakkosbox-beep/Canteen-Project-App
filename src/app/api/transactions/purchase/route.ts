@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import DatabaseManager from '@/lib/database';
+import type { ProductOptionSelection } from '@/types/database';
 
 export const runtime = 'nodejs';
 
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json();
-    const { customerId, barcode, productId, note } = body;
+  const body = await request.json();
+  const { customerId, barcode, productId, note, selectedOptions } = body;
 
     if (!customerId || (typeof customerId !== 'string' || customerId.trim().length === 0)) {
       return NextResponse.json(
@@ -28,11 +29,16 @@ export async function POST(request: NextRequest) {
     const normalizedCustomerId = customerId.trim();
 
     const database = DatabaseManager.getInstance();
+    const normalizedSelectedOptions = Array.isArray(selectedOptions)
+      ? (selectedOptions as ProductOptionSelection[])
+      : undefined;
+
     const result = await database.processPurchase(normalizedCustomerId, {
       barcode: typeof barcode === 'string' && barcode.trim().length > 0 ? barcode.trim() : undefined,
       productId:
         typeof productId === 'string' && productId.trim().length > 0 ? productId.trim() : undefined,
       note: typeof note === 'string' && note.trim().length > 0 ? note.trim() : undefined,
+      selectedOptions: normalizedSelectedOptions,
     });
     
     return NextResponse.json({

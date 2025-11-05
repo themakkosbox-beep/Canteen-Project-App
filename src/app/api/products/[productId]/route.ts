@@ -42,7 +42,41 @@ export async function PUT(
     }
 
     const body = await request.json();
-    const { name, price, barcode, category, active, options } = body;
+    const { name, price, barcode, category, active, options, discountPercent, discountFlat } = body;
+
+    const discountPercentValue =
+      discountPercent === undefined
+        ? undefined
+        : discountPercent === null || discountPercent === ''
+        ? null
+        : Number(discountPercent);
+    if (
+      discountPercentValue !== undefined &&
+      discountPercentValue !== null &&
+      (!Number.isFinite(discountPercentValue) || discountPercentValue < 0 || discountPercentValue > 100)
+    ) {
+      return NextResponse.json(
+        { error: 'discountPercent must be between 0 and 100' },
+        { status: 400 }
+      );
+    }
+
+    const discountFlatValue =
+      discountFlat === undefined
+        ? undefined
+        : discountFlat === null || discountFlat === ''
+        ? null
+        : Number(discountFlat);
+    if (
+      discountFlatValue !== undefined &&
+      discountFlatValue !== null &&
+      (!Number.isFinite(discountFlatValue) || discountFlatValue < 0)
+    ) {
+      return NextResponse.json(
+        { error: 'discountFlat must be zero or a positive number' },
+        { status: 400 }
+      );
+    }
 
     const database = DatabaseManager.getInstance();
     const product = await database.updateProduct(productId, {
@@ -52,6 +86,8 @@ export async function PUT(
       category: category === null ? null : category,
       active: active === undefined ? undefined : Boolean(active),
       options: Array.isArray(options) ? options : options === null ? null : undefined,
+      discountPercent: discountPercentValue,
+      discountFlat: discountFlatValue,
     });
 
     return NextResponse.json(serializeProduct(product));

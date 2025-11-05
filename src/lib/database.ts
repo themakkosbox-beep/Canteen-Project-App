@@ -5,10 +5,12 @@ import {
   Customer,
   Product,
   ProductOptionGroup,
+  ProductOptionSelection,
   QuickKeySlot,
   Transaction,
   TransactionExportRow,
   TransactionLog,
+  TransactionOptionSelection,
 } from '@/types/database';
 
 const QUICK_KEY_SETTING_KEY = 'quick_keys';
@@ -18,6 +20,8 @@ export interface BulkCustomerInput {
   customerId: string;
   name?: string;
   initialBalance?: number;
+  discountPercent?: number;
+  discountFlat?: number;
 }
 
 export interface BulkProductInput {
@@ -28,6 +32,8 @@ export interface BulkProductInput {
   category?: string;
   active?: boolean;
   options?: ProductOptionGroup[];
+  discountPercent?: number;
+  discountFlat?: number;
 }
 
 class DatabaseManager {
@@ -96,6 +102,8 @@ class DatabaseManager {
         customer_id TEXT UNIQUE NOT NULL,
         name TEXT,
         balance REAL NOT NULL DEFAULT 0,
+        discount_percent REAL DEFAULT 0,
+        discount_flat REAL DEFAULT 0,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
       );
@@ -107,6 +115,7 @@ class DatabaseManager {
         barcode TEXT UNIQUE,
         category TEXT,
         active BOOLEAN DEFAULT 1,
+        options_json TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
       );
@@ -119,6 +128,10 @@ class DatabaseManager {
         amount REAL NOT NULL,
         balance_after REAL NOT NULL,
         note TEXT,
+        options_json TEXT,
+        voided BOOLEAN DEFAULT 0,
+        voided_at DATETIME,
+        void_note TEXT,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
         staff_id TEXT,
         FOREIGN KEY (customer_id) REFERENCES customers (customer_id),
@@ -135,7 +148,15 @@ class DatabaseManager {
       );
     `);
 
-    this.ensureColumn(db, 'products', 'options_json', 'TEXT');
+  this.ensureColumn(db, 'products', 'options_json', 'TEXT');
+  this.ensureColumn(db, 'products', 'discount_percent', 'REAL DEFAULT 0');
+  this.ensureColumn(db, 'products', 'discount_flat', 'REAL DEFAULT 0');
+    this.ensureColumn(db, 'customers', 'discount_percent', 'REAL DEFAULT 0');
+    this.ensureColumn(db, 'customers', 'discount_flat', 'REAL DEFAULT 0');
+    this.ensureColumn(db, 'transactions', 'options_json', 'TEXT');
+    this.ensureColumn(db, 'transactions', 'voided', 'BOOLEAN DEFAULT 0');
+    this.ensureColumn(db, 'transactions', 'voided_at', 'DATETIME');
+    this.ensureColumn(db, 'transactions', 'void_note', 'TEXT');
   }
 
   private readSetting(db: SqlJsDatabase, key: string): string | null {
@@ -239,12 +260,21 @@ class DatabaseManager {
                   ? choice.id.trim()
                   : `opt_${groupIndex}_${choiceIndex}_${Math.random().toString(36).slice(2, 6)}`;
 
+              const priceDeltaRaw = (choice as { priceDelta?: unknown }).priceDelta;
+              const priceDelta =
+                typeof priceDeltaRaw === 'number' && Number.isFinite(priceDeltaRaw)
+                  ? priceDeltaRaw
+                  : 0;
+
               return {
                 id: normalizedId,
                 label,
+                priceDelta,
               };
             })
-            .filter((value): value is { id: string; label: string } => Boolean(value))
+            .filter((value): value is { id: string; label: string; priceDelta: number } =>
+              Boolean(value)
+            )
         : [];
 
       if (choices.length === 0) {
@@ -280,7 +310,76 @@ class DatabaseManager {
       if (!Array.isArray(parsed)) {
         return undefined;
       }
-      return parsed as ProductOptionGroup[];
+      const sanitized: ProductOptionGroup[] = [];
+
+      parsed.forEach((group) => {
+        if (!group || typeof group !== 'object') {
+          return;
+        }
+
+        const name = typeof (group as { name?: unknown }).name === 'string'
+          ? (group as { name: string }).name
+          : '';
+        if (!name.trim()) {
+          return;
+        }
+
+        const groupId = typeof (group as { id?: unknown }).id === 'string'
+          ? (group as { id: string }).id
+          : `grp_${Math.random().toString(36).slice(2, 10)}`;
+
+        const required = Boolean((group as { required?: unknown }).required);
+        const multiple = Boolean((group as { multiple?: unknown }).multiple);
+
+        const choicesSource = Array.isArray((group as { choices?: unknown }).choices)
+          ? ((group as { choices: unknown[] }).choices)
+          : [];
+
+        const sanitizedChoices = choicesSource
+          .map((choice) => {
+            if (!choice || typeof choice !== 'object') {
+              return null;
+            }
+
+            const label = typeof (choice as { label?: unknown }).label === 'string'
+              ? (choice as { label: string }).label.trim()
+              : '';
+            if (!label) {
+              return null;
+            }
+
+            const id = typeof (choice as { id?: unknown }).id === 'string'
+              ? (choice as { id: string }).id
+              : `opt_${Math.random().toString(36).slice(2, 10)}`;
+
+            const rawDelta = (choice as { priceDelta?: unknown }).priceDelta;
+            const priceDelta =
+              typeof rawDelta === 'number' && Number.isFinite(rawDelta) ? rawDelta : 0;
+
+            return {
+              id,
+              label,
+              priceDelta,
+            };
+          })
+          .filter((value): value is { id: string; label: string; priceDelta: number } =>
+            Boolean(value)
+          );
+
+        if (sanitizedChoices.length === 0) {
+          return;
+        }
+
+        sanitized.push({
+          id: groupId,
+          name: name.trim(),
+          required,
+          multiple,
+          choices: sanitizedChoices,
+        });
+      });
+
+      return sanitized.length > 0 ? sanitized : undefined;
     } catch (error) {
       console.warn('Failed to parse product options JSON', error);
       return undefined;
@@ -289,8 +388,278 @@ class DatabaseManager {
 
   private hydrateProduct(raw: Product): Product {
     const options = this.parseProductOptions(raw.options_json ?? null);
+    const discountPercent =
+      typeof (raw as { discount_percent?: unknown }).discount_percent === 'number'
+        ? (raw as { discount_percent: number }).discount_percent
+        : 0;
+    const discountFlat =
+      typeof (raw as { discount_flat?: unknown }).discount_flat === 'number'
+        ? (raw as { discount_flat: number }).discount_flat
+        : 0;
     return {
       ...raw,
+      discount_percent: discountPercent,
+      discount_flat: discountFlat,
+      options,
+    };
+  }
+
+  private hydrateCustomer(raw: Customer): Customer {
+    const discountPercent =
+      typeof (raw as { discount_percent?: unknown }).discount_percent === 'number'
+        ? (raw as { discount_percent: number }).discount_percent
+        : 0;
+    const discountFlat =
+      typeof (raw as { discount_flat?: unknown }).discount_flat === 'number'
+        ? (raw as { discount_flat: number }).discount_flat
+        : 0;
+
+    return {
+      ...raw,
+      discount_percent: discountPercent,
+      discount_flat: discountFlat,
+    };
+  }
+
+  private normalizeOptionSelections(
+    product: Product,
+    selections?: ProductOptionSelection[] | null
+  ): { selections: TransactionOptionSelection[]; totalDelta: number } {
+    const optionGroups = Array.isArray(product.options) ? product.options : [];
+    if (optionGroups.length === 0 || !Array.isArray(selections) || selections.length === 0) {
+      return { selections: [], totalDelta: 0 };
+    }
+
+    const groupById = new Map<string, ProductOptionGroup>();
+    optionGroups.forEach((group) => {
+      groupById.set(group.id, group);
+    });
+
+    const normalizedChoicesByGroup = new Map<string, string[]>();
+
+    selections.forEach((selection) => {
+      if (!selection || typeof selection.groupId !== 'string') {
+        return;
+      }
+
+      const trimmedGroupId = selection.groupId.trim();
+      if (!trimmedGroupId) {
+        return;
+      }
+
+      const group = groupById.get(trimmedGroupId);
+      if (!group) {
+        console.warn('Ignoring option selection for unknown group', trimmedGroupId);
+        return;
+      }
+
+      const choiceIds = Array.isArray(selection.choiceIds) ? selection.choiceIds : [];
+      const normalized: string[] = [];
+      const seen = new Set<string>();
+
+      for (const rawChoiceId of choiceIds) {
+        if (typeof rawChoiceId !== 'string') {
+          continue;
+        }
+        const trimmedChoiceId = rawChoiceId.trim();
+        if (!trimmedChoiceId || seen.has(trimmedChoiceId)) {
+          continue;
+        }
+
+        const choiceExists = group.choices.some((choice) => choice.id === trimmedChoiceId);
+        if (!choiceExists) {
+          continue;
+        }
+
+        normalized.push(trimmedChoiceId);
+        seen.add(trimmedChoiceId);
+
+        if (!group.multiple) {
+          break;
+        }
+      }
+
+      normalizedChoicesByGroup.set(group.id, normalized);
+    });
+
+    const selectionsSnapshot: TransactionOptionSelection[] = [];
+    let totalDelta = 0;
+
+    optionGroups.forEach((group) => {
+      const selectedIds = normalizedChoicesByGroup.get(group.id) ?? [];
+
+      if (group.required && selectedIds.length === 0) {
+        throw new Error(`Selection required for "${group.name}"`);
+      }
+
+      if (selectedIds.length === 0) {
+        return;
+      }
+
+      const resolvedChoices = selectedIds
+        .map((choiceId) => group.choices.find((choice) => choice.id === choiceId))
+        .filter((choice): choice is ProductOptionGroup['choices'][number] => Boolean(choice))
+        .map((choice) => ({
+          id: choice.id,
+          label: choice.label,
+          priceDelta:
+            typeof choice.priceDelta === 'number' && Number.isFinite(choice.priceDelta)
+              ? choice.priceDelta
+              : 0,
+        }));
+
+      const groupDelta = resolvedChoices.reduce((sum, choice) => sum + choice.priceDelta, 0);
+
+      if (group.required && resolvedChoices.length === 0) {
+        throw new Error(`Selection required for "${group.name}"`);
+      }
+
+      if (resolvedChoices.length === 0) {
+        return;
+      }
+
+      totalDelta += groupDelta;
+
+      selectionsSnapshot.push({
+        groupId: group.id,
+        groupName: group.name,
+        multiple: group.multiple,
+        required: group.required,
+        choices: resolvedChoices,
+        delta: groupDelta,
+      });
+    });
+
+    return { selections: selectionsSnapshot, totalDelta };
+  }
+
+  private roundCurrency(value: number): number {
+    return Math.round(value * 100) / 100;
+  }
+
+  private applyDiscount(value: number, percent?: number, flat?: number): number {
+    let result = value;
+
+    if (typeof percent === 'number' && Number.isFinite(percent) && percent > 0) {
+      const boundedPercent = Math.min(100, Math.max(0, percent));
+      result = this.roundCurrency(result - result * (boundedPercent / 100));
+    }
+
+    if (typeof flat === 'number' && Number.isFinite(flat) && flat > 0) {
+      result = this.roundCurrency(result - flat);
+    }
+
+    return result < 0 ? 0 : result;
+  }
+
+  private parseTransactionOptions(
+    optionsJson?: string | null
+  ): TransactionOptionSelection[] | undefined {
+    if (!optionsJson) {
+      return undefined;
+    }
+
+    try {
+      const parsed = JSON.parse(optionsJson);
+      if (!Array.isArray(parsed)) {
+        return undefined;
+      }
+
+      const sanitized: TransactionOptionSelection[] = [];
+
+      parsed.forEach((group) => {
+        if (!group || typeof group !== 'object') {
+          return;
+        }
+
+        const groupId = typeof (group as { groupId?: unknown }).groupId === 'string'
+          ? (group as { groupId: string }).groupId
+          : '';
+        const groupName = typeof (group as { groupName?: unknown }).groupName === 'string'
+          ? (group as { groupName: string }).groupName
+          : '';
+
+        if (!groupId || !groupName) {
+          return;
+        }
+
+        const multiple = Boolean((group as { multiple?: unknown }).multiple);
+        const required = Boolean((group as { required?: unknown }).required);
+        const deltaRaw = (group as { delta?: unknown }).delta;
+        const delta =
+          typeof deltaRaw === 'number' && Number.isFinite(deltaRaw)
+            ? deltaRaw
+            : 0;
+
+        const choicesSource = Array.isArray((group as { choices?: unknown }).choices)
+          ? ((group as { choices: unknown[] }).choices)
+          : [];
+
+        const choices = choicesSource
+          .map((choice) => {
+            if (!choice || typeof choice !== 'object') {
+              return null;
+            }
+
+            const id = typeof (choice as { id?: unknown }).id === 'string'
+              ? (choice as { id: string }).id
+              : '';
+            const label = typeof (choice as { label?: unknown }).label === 'string'
+              ? (choice as { label: string }).label
+              : '';
+            if (!id || !label) {
+              return null;
+            }
+
+            const priceDeltaRaw = (choice as { priceDelta?: unknown }).priceDelta;
+            const priceDelta =
+              typeof priceDeltaRaw === 'number' && Number.isFinite(priceDeltaRaw)
+                ? priceDeltaRaw
+                : 0;
+
+            return { id, label, priceDelta };
+          })
+          .filter((choice): choice is { id: string; label: string; priceDelta: number } =>
+            Boolean(choice)
+          );
+
+        if (choices.length === 0) {
+          return;
+        }
+
+        sanitized.push({
+          groupId,
+          groupName,
+          multiple,
+          required,
+          delta,
+          choices,
+        });
+      });
+
+      return sanitized.length > 0 ? sanitized : undefined;
+    } catch (error) {
+      console.warn('Failed to parse transaction options JSON', error);
+      return undefined;
+    }
+  }
+
+  private hydrateTransaction(raw: Transaction): Transaction {
+    const voided = Boolean((raw as { voided?: unknown }).voided);
+    const options = this.parseTransactionOptions(raw.options_json ?? null);
+
+    const rawVoidedAt = (raw as { voided_at?: unknown }).voided_at;
+    const voidedAt = typeof rawVoidedAt === 'string' ? rawVoidedAt : null;
+
+    const rawVoidNote = (raw as { void_note?: unknown }).void_note;
+    const voidNote = typeof rawVoidNote === 'string' ? rawVoidNote : null;
+
+    return {
+      ...raw,
+      voided,
+      options_json: raw.options_json ?? null,
+      voided_at: voidedAt,
+      void_note: voidNote,
       options,
     };
   }
@@ -364,7 +733,9 @@ class DatabaseManager {
   public async createCustomer(
     customerId: string,
     name?: string,
-    initialBalance: number = 0
+    initialBalance: number = 0,
+    discountPercent: number = 0,
+    discountFlat: number = 0
   ): Promise<Customer> {
     if (!/^[0-9]{4}$/.test(customerId)) {
       throw new Error('Customer ID must be exactly 4 digits');
@@ -373,6 +744,13 @@ class DatabaseManager {
     if (!Number.isFinite(initialBalance) || initialBalance < 0) {
       throw new Error('Initial balance must be zero or a positive number');
     }
+
+    const normalizedPercent =
+      Number.isFinite(discountPercent) && discountPercent > 0
+        ? Math.min(100, Math.max(0, discountPercent))
+        : 0;
+    const normalizedFlat =
+      Number.isFinite(discountFlat) && discountFlat > 0 ? Math.max(0, discountFlat) : 0;
 
     return this.withDatabase((db) => {
       const existingStmt = db.prepare(
@@ -387,10 +765,16 @@ class DatabaseManager {
       }
 
       const insertStmt = db.prepare(`
-        INSERT INTO customers (customer_id, name, balance)
-        VALUES (?, ?, ?)
+        INSERT INTO customers (customer_id, name, balance, discount_percent, discount_flat)
+        VALUES (?, ?, ?, ?, ?)
       `);
-      insertStmt.bind([customerId, name ?? null, initialBalance]);
+      insertStmt.bind([
+        customerId,
+        name ?? null,
+        initialBalance,
+        normalizedPercent,
+        normalizedFlat,
+      ]);
       insertStmt.step();
       insertStmt.free();
 
@@ -421,13 +805,13 @@ class DatabaseManager {
         'SELECT * FROM customers WHERE customer_id = ?'
       );
       selectStmt.bind([customerId]);
-      const customer = this.fetchOne<Customer>(selectStmt);
+      const customerRow = this.fetchOne<Customer>(selectStmt);
 
-      if (!customer) {
+      if (!customerRow) {
         throw new Error('Failed to create customer');
       }
 
-      return customer;
+      return this.hydrateCustomer(customerRow);
     }, true);
   }
 
@@ -452,7 +836,7 @@ class DatabaseManager {
           `%${trimmedSearch}%`,
           normalizedLimit,
         ]);
-        return this.fetchAll<Customer>(stmt);
+        return this.fetchAll<Customer>(stmt).map((customer) => this.hydrateCustomer(customer));
       }
 
       const stmt = db.prepare(`
@@ -462,7 +846,7 @@ class DatabaseManager {
         LIMIT ?
       `);
       stmt.bind([normalizedLimit]);
-      return this.fetchAll<Customer>(stmt);
+      return this.fetchAll<Customer>(stmt).map((customer) => this.hydrateCustomer(customer));
     });
   }
 
@@ -474,8 +858,19 @@ class DatabaseManager {
     category?: string;
     active?: boolean;
     options?: ProductOptionGroup[];
+    discountPercent?: number;
+    discountFlat?: number;
   }): Promise<Product> {
-    const { productId, name, price, barcode, category, active = true } = options;
+    const {
+      productId,
+      name,
+      price,
+      barcode,
+      category,
+      active = true,
+      discountPercent = 0,
+      discountFlat = 0,
+    } = options;
     const normalizedOptions = this.normalizeProductOptions(options.options ?? null);
     const optionsJson = normalizedOptions ? JSON.stringify(normalizedOptions) : null;
 
@@ -488,6 +883,13 @@ class DatabaseManager {
     }
 
     const finalProductId = (productId ?? '').trim() || this.generateProductId();
+
+    const normalizedDiscountPercent =
+      Number.isFinite(discountPercent) && discountPercent > 0
+        ? Math.min(100, Math.max(0, discountPercent))
+        : 0;
+    const normalizedDiscountFlat =
+      Number.isFinite(discountFlat) && discountFlat > 0 ? Math.max(0, discountFlat) : 0;
 
     return this.withDatabase((db) => {
       const idStmt = db.prepare('SELECT 1 FROM products WHERE product_id = ?');
@@ -513,8 +915,8 @@ class DatabaseManager {
       }
 
       const insertStmt = db.prepare(`
-        INSERT INTO products (product_id, name, price, barcode, category, active, options_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO products (product_id, name, price, barcode, category, active, options_json, discount_percent, discount_flat)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       insertStmt.bind([
         finalProductId,
@@ -524,6 +926,8 @@ class DatabaseManager {
         category ?? null,
         active ? 1 : 0,
         optionsJson,
+        normalizedDiscountPercent,
+        normalizedDiscountFlat,
       ]);
       insertStmt.step();
       insertStmt.free();
@@ -595,7 +999,8 @@ class DatabaseManager {
     return this.withDatabase((db) => {
       const stmt = db.prepare('SELECT * FROM customers WHERE customer_id = ?');
       stmt.bind([customerId]);
-      return this.fetchOne<Customer>(stmt);
+      const customer = this.fetchOne<Customer>(stmt);
+      return customer ? this.hydrateCustomer(customer) : null;
     });
   }
 
@@ -613,7 +1018,11 @@ class DatabaseManager {
         LIMIT ?
       `);
       stmt.bind([customerId, limit]);
-      return this.fetchAll<TransactionLog>(stmt);
+      const rows = this.fetchAll<TransactionLog>(stmt);
+      return rows.map((row) => ({
+        ...this.hydrateTransaction(row),
+        product_name: row.product_name,
+      }));
     });
   }
 
@@ -659,10 +1068,15 @@ class DatabaseManager {
 
   public async processPurchase(
     customerId: string,
-    payload: { barcode?: string; productId?: string; note?: string }
+    payload: {
+      barcode?: string;
+      productId?: string;
+      note?: string;
+      selectedOptions?: ProductOptionSelection[] | null;
+    }
   ) {
     return this.withDatabase((db) => {
-      const { barcode, productId, note } = payload;
+      const { barcode, productId, note, selectedOptions } = payload;
 
       if (!barcode && !productId) {
         throw new Error('Barcode or product ID is required');
@@ -672,10 +1086,11 @@ class DatabaseManager {
         'SELECT * FROM customers WHERE customer_id = ?'
       );
       customerStmt.bind([customerId]);
-      const customer = this.fetchOne<Customer>(customerStmt);
-      if (!customer) {
+      const customerRow = this.fetchOne<Customer>(customerStmt);
+      if (!customerRow) {
         throw new Error('Customer not found');
       }
+      const customer = this.hydrateCustomer(customerRow);
 
       let product: Product | null = null;
       if (barcode) {
@@ -698,11 +1113,39 @@ class DatabaseManager {
         throw new Error('Product not found or inactive');
       }
 
-      if (customer.balance < product.price) {
+      const { selections: optionSelections, totalDelta } = this.normalizeOptionSelections(
+        product,
+        selectedOptions
+      );
+
+      const currentBalance = this.roundCurrency(customer.balance);
+      const basePrice = this.roundCurrency(product.price);
+      const optionsDelta = this.roundCurrency(totalDelta);
+      const optionAdjustedPrice = this.roundCurrency(basePrice + optionsDelta);
+
+      let finalPrice = optionAdjustedPrice;
+      finalPrice = this.applyDiscount(finalPrice, product.discount_percent, product.discount_flat);
+      finalPrice = this.applyDiscount(finalPrice, customer.discount_percent, customer.discount_flat);
+      finalPrice = this.roundCurrency(finalPrice);
+
+      if (currentBalance + 0.00001 < finalPrice) {
         throw new Error('Insufficient balance');
       }
 
-      const newBalance = customer.balance - product.price;
+      let amount = finalPrice === 0 ? 0 : this.roundCurrency(-finalPrice);
+      if (Object.is(amount, -0)) {
+        amount = 0;
+      }
+
+      let newBalance = this.roundCurrency(currentBalance + amount);
+      if (newBalance < 0 && newBalance > -0.01) {
+        newBalance = 0;
+      }
+      if (newBalance < 0) {
+        throw new Error('Insufficient balance');
+      }
+
+      const selectionJson = optionSelections.length > 0 ? JSON.stringify(optionSelections) : null;
 
       const updateStmt = db.prepare(`
         UPDATE customers
@@ -722,16 +1165,18 @@ class DatabaseManager {
           product_id,
           amount,
           balance_after,
-          note
-        ) VALUES (?, ?, 'purchase', ?, ?, ?, ?)
+          note,
+          options_json
+        ) VALUES (?, ?, 'purchase', ?, ?, ?, ?, ?)
       `);
       insertStmt.bind([
         transactionId,
         customerId,
         product.product_id,
-        -product.price,
+        amount,
         newBalance,
         note ?? null,
+        selectionJson,
       ]);
       insertStmt.step();
       insertStmt.free();
@@ -740,15 +1185,19 @@ class DatabaseManager {
         'SELECT * FROM transactions WHERE transaction_id = ?'
       );
       selectTransaction.bind([transactionId]);
-      const transaction = this.fetchOne<Transaction>(selectTransaction);
-      if (!transaction) {
+      const transactionRow = this.fetchOne<Transaction>(selectTransaction);
+      if (!transactionRow) {
         throw new Error('Failed to record transaction');
       }
+
+      const transaction = this.hydrateTransaction(transactionRow);
 
       return {
         transaction,
         product,
-        oldBalance: customer.balance,
+        optionSelections,
+        chargedAmount: finalPrice,
+        oldBalance: currentBalance,
         newBalance,
       };
     }, true);
@@ -935,10 +1384,12 @@ class DatabaseManager {
         'SELECT * FROM transactions WHERE transaction_id = ?'
       );
       selectTransaction.bind([transactionId]);
-      const transaction = this.fetchOne<Transaction>(selectTransaction);
-      if (!transaction) {
+      const transactionRow = this.fetchOne<Transaction>(selectTransaction);
+      if (!transactionRow) {
         throw new Error('Failed to record transaction');
       }
+
+      const transaction = this.hydrateTransaction(transactionRow);
 
       return {
         transaction,
@@ -1002,10 +1453,12 @@ class DatabaseManager {
         'SELECT * FROM transactions WHERE transaction_id = ?'
       );
       selectTransaction.bind([transactionId]);
-      const transaction = this.fetchOne<Transaction>(selectTransaction);
-      if (!transaction) {
+      const transactionRow = this.fetchOne<Transaction>(selectTransaction);
+      if (!transactionRow) {
         throw new Error('Failed to record transaction');
       }
+
+      const transaction = this.hydrateTransaction(transactionRow);
 
       return {
         transaction,
@@ -1245,11 +1698,13 @@ class DatabaseManager {
         'SELECT * FROM transactions WHERE transaction_id = ?'
       );
       transactionStmt.bind([transactionId]);
-      const transaction = this.fetchOne<Transaction>(transactionStmt);
+      const transactionRow = this.fetchOne<Transaction>(transactionStmt);
 
-      if (!transaction) {
+      if (!transactionRow) {
         throw new Error('Transaction not found');
       }
+
+      const transaction = this.hydrateTransaction(transactionRow);
 
       if (transaction.type !== 'purchase' && transaction.type !== 'deposit') {
         throw new Error('Only purchase or deposit transactions can be deleted');
@@ -1277,7 +1732,12 @@ class DatabaseManager {
         throw new Error('Customer not found');
       }
 
-      const newBalance = customer.balance - transaction.amount;
+      const currentBalance = this.roundCurrency(customer.balance);
+      const amount = this.roundCurrency(transaction.amount);
+      let newBalance = this.roundCurrency(currentBalance - amount);
+      if (newBalance < 0 && newBalance > -0.01) {
+        newBalance = 0;
+      }
 
       const updateStmt = db.prepare(`
         UPDATE customers
@@ -1349,7 +1809,7 @@ class DatabaseManager {
         throw new Error('Failed to update customer');
       }
 
-      return customer;
+      return this.hydrateCustomer(customer);
     }, true);
   }
 
@@ -1362,6 +1822,8 @@ class DatabaseManager {
       category?: string | null;
       active?: boolean;
       options?: ProductOptionGroup[] | null;
+      discountPercent?: number | null;
+      discountFlat?: number | null;
     }
   ): Promise<Product> {
     return this.withDatabase((db) => {
@@ -1404,6 +1866,27 @@ class DatabaseManager {
       const nextActive =
         updates.active === undefined ? existing.active : updates.active;
 
+      const nextDiscountPercentRaw = updates.discountPercent;
+      const nextDiscountFlatRaw = updates.discountFlat;
+
+      const nextDiscountPercent =
+        nextDiscountPercentRaw === undefined
+          ? existing.discount_percent ?? 0
+          : nextDiscountPercentRaw === null
+          ? 0
+          : typeof nextDiscountPercentRaw === 'number' && Number.isFinite(nextDiscountPercentRaw)
+          ? Math.min(100, Math.max(0, nextDiscountPercentRaw))
+          : 0;
+
+      const nextDiscountFlat =
+        nextDiscountFlatRaw === undefined
+          ? existing.discount_flat ?? 0
+          : nextDiscountFlatRaw === null
+          ? 0
+          : typeof nextDiscountFlatRaw === 'number' && Number.isFinite(nextDiscountFlatRaw)
+          ? Math.max(0, nextDiscountFlatRaw)
+          : 0;
+
       let nextOptionsJson = existing.options_json ?? null;
       let nextOptions = existing.options;
       if (updates.options !== undefined) {
@@ -1431,7 +1914,7 @@ class DatabaseManager {
 
       const updateStmt = db.prepare(`
         UPDATE products
-        SET name = ?, price = ?, barcode = ?, category = ?, active = ?, options_json = ?, updated_at = datetime('now')
+        SET name = ?, price = ?, barcode = ?, category = ?, active = ?, options_json = ?, discount_percent = ?, discount_flat = ?, updated_at = datetime('now')
         WHERE product_id = ?
       `);
       updateStmt.bind([
@@ -1441,6 +1924,8 @@ class DatabaseManager {
         nextCategory,
         nextActive ? 1 : 0,
         nextOptionsJson,
+        nextDiscountPercent,
+        nextDiscountFlat,
         productId,
       ]);
       updateStmt.step();
@@ -1473,7 +1958,9 @@ class DatabaseManager {
         const customer = await this.createCustomer(
           entry.customerId,
           entry.name,
-          entry.initialBalance ?? 0
+          entry.initialBalance ?? 0,
+          entry.discountPercent ?? 0,
+          entry.discountFlat ?? 0
         );
         created.push(customer);
       } catch (error) {
@@ -1501,6 +1988,8 @@ class DatabaseManager {
           category: entry.category,
           active: entry.active ?? true,
           options: entry.options,
+          discountPercent: entry.discountPercent,
+          discountFlat: entry.discountFlat,
         });
         created.push(product);
       } catch (error) {

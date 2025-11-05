@@ -28,7 +28,17 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    const { productId, name, price, barcode, category, active, options } = await request.json();
+    const {
+      productId,
+      name,
+      price,
+      barcode,
+      category,
+      active,
+      options,
+      discountPercent,
+      discountFlat,
+    } = await request.json();
 
     if (!name || typeof name !== 'string' || name.trim().length === 0) {
       return NextResponse.json(
@@ -45,6 +55,34 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const normalizedDiscountPercent =
+      discountPercent === undefined || discountPercent === null || discountPercent === ''
+        ? undefined
+        : Number(discountPercent);
+    if (
+      normalizedDiscountPercent !== undefined &&
+      (!Number.isFinite(normalizedDiscountPercent) || normalizedDiscountPercent < 0 || normalizedDiscountPercent > 100)
+    ) {
+      return NextResponse.json(
+        { error: 'discountPercent must be between 0 and 100' },
+        { status: 400 }
+      );
+    }
+
+    const normalizedDiscountFlat =
+      discountFlat === undefined || discountFlat === null || discountFlat === ''
+        ? undefined
+        : Number(discountFlat);
+    if (
+      normalizedDiscountFlat !== undefined &&
+      (!Number.isFinite(normalizedDiscountFlat) || normalizedDiscountFlat < 0)
+    ) {
+      return NextResponse.json(
+        { error: 'discountFlat must be zero or a positive number' },
+        { status: 400 }
+      );
+    }
+
     const database = DatabaseManager.getInstance();
     const product = await database.createProduct({
       productId: typeof productId === 'string' && productId.trim().length > 0 ? productId.trim() : undefined,
@@ -54,6 +92,8 @@ export async function POST(request: NextRequest) {
       category: typeof category === 'string' && category.trim().length > 0 ? category.trim() : undefined,
       active: active === undefined ? true : Boolean(active),
       options: Array.isArray(options) ? options : undefined,
+      discountPercent: normalizedDiscountPercent,
+      discountFlat: normalizedDiscountFlat,
     });
 
     return NextResponse.json(serializeProduct(product), { status: 201 });
