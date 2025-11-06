@@ -1,6 +1,6 @@
 {
   "name": "camp-canteen-pos",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Camp Canteen POS System with prepaid accounts and barcode scanning",
   "main": "index.js",
   "scripts": {
@@ -8,7 +8,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "db:setup": "node scripts/setup-db.js"
+    "db:setup": "node scripts/setup-db.js",
+    "test:e2e": "node scripts/e2e-db-check.js"
   },
   "dependencies": {
     "@headlessui/react": "^2.2.9",

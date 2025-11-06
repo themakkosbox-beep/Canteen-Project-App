@@ -15,6 +15,11 @@ import {
 
 const QUICK_KEY_SETTING_KEY = 'quick_keys';
 const MAX_QUICK_KEYS = 5;
+const BACKUP_FOLDER_NAME = 'backups';
+const BACKUP_META_FILE_NAME = 'backup-metadata.json';
+const BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const BACKUP_RETENTION_COUNT = 14; // keep the last 14 backups (roughly two weeks)
+const BACKUP_RETENTION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // drop anything older than 30 days
 
 export interface BulkCustomerInput {
   customerId: string;
@@ -38,7 +43,13 @@ export interface BulkProductInput {
 
 class DatabaseManager {
   private static instance: DatabaseManager;
+  private static backupSchedulerInitialized = false;
+  private static backupSchedulerHandle: NodeJS.Timeout | null = null;
+  private static backupInProgress = false;
+  private static lastBackupTimestamp: number | null = null;
   private readonly dbPath: string;
+  private readonly backupDir: string;
+  private readonly backupMetaPath: string;
   private readonly sqlPromise: Promise<SqlJsStatic>;
 
   private constructor() {
@@ -51,6 +62,13 @@ class DatabaseManager {
       console.warn('Failed to ensure data directory', error);
     }
     this.dbPath = path.join(dataRoot, 'canteen.db');
+    this.backupDir = path.join(dataRoot, BACKUP_FOLDER_NAME);
+    this.backupMetaPath = path.join(this.backupDir, BACKUP_META_FILE_NAME);
+    try {
+      fs.mkdirSync(this.backupDir, { recursive: true });
+    } catch (error) {
+      console.warn('Failed to ensure backup directory', error);
+    }
     if (!fs.existsSync(this.dbPath)) {
       const bundledDb = path.join(process.cwd(), 'canteen.db');
       try {
@@ -66,9 +84,156 @@ class DatabaseManager {
 
   public static getInstance(): DatabaseManager {
     if (!DatabaseManager.instance) {
-      DatabaseManager.instance = new DatabaseManager();
+      const initialized = new DatabaseManager();
+      DatabaseManager.instance = initialized;
+      initialized.initializeBackgroundTasks();
     }
     return DatabaseManager.instance;
+  }
+
+  private initializeBackgroundTasks(): void {
+    if (DatabaseManager.backupSchedulerInitialized) {
+      return;
+    }
+
+    DatabaseManager.backupSchedulerInitialized = true;
+    this.loadBackupMetadata();
+
+    // Kick off an initial backup asynchronously so startup requests are not blocked.
+    void this.performScheduledBackup(false);
+    this.scheduleAutomaticBackups();
+
+    process.once('exit', () => {
+      if (DatabaseManager.backupSchedulerHandle) {
+        clearInterval(DatabaseManager.backupSchedulerHandle);
+        DatabaseManager.backupSchedulerHandle = null;
+      }
+    });
+  }
+
+  private scheduleAutomaticBackups(): void {
+    if (DatabaseManager.backupSchedulerHandle) {
+      return;
+    }
+
+    const runner = () => {
+      void this.performScheduledBackup(false);
+    };
+
+    DatabaseManager.backupSchedulerHandle = setInterval(runner, BACKUP_INTERVAL_MS);
+    if (typeof DatabaseManager.backupSchedulerHandle.unref === 'function') {
+      DatabaseManager.backupSchedulerHandle.unref();
+    }
+  }
+
+  private loadBackupMetadata(): void {
+    try {
+      const raw = fs.readFileSync(this.backupMetaPath, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.lastBackupAt === 'string') {
+        const timestamp = Date.parse(parsed.lastBackupAt);
+        if (!Number.isNaN(timestamp)) {
+          DatabaseManager.lastBackupTimestamp = timestamp;
+        }
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+        console.warn('Failed to read backup metadata', error);
+      }
+    }
+  }
+
+  private writeBackupMetadata(timestamp: Date): void {
+    const payload = {
+      lastBackupAt: timestamp.toISOString(),
+    };
+
+    try {
+      fs.mkdirSync(this.backupDir, { recursive: true });
+      fs.writeFileSync(this.backupMetaPath, JSON.stringify(payload, null, 2), 'utf-8');
+    } catch (error) {
+      console.warn('Failed to persist backup metadata', error);
+    }
+  }
+
+  private async performScheduledBackup(force: boolean): Promise<void> {
+    if (DatabaseManager.backupInProgress) {
+      return;
+    }
+
+    const lastBackup = DatabaseManager.lastBackupTimestamp;
+    const now = Date.now();
+    if (!force && lastBackup && now - lastBackup < BACKUP_INTERVAL_MS * 0.9) {
+      return;
+    }
+
+    DatabaseManager.backupInProgress = true;
+
+    try {
+      const timestamp = new Date();
+      const fileName = `canteen-${this.formatBackupTimestamp(timestamp)}.db`;
+      const destination = path.join(this.backupDir, fileName);
+
+      await this.backup(destination);
+
+      DatabaseManager.lastBackupTimestamp = timestamp.getTime();
+      this.writeBackupMetadata(timestamp);
+      this.enforceBackupRetention();
+    } catch (error) {
+      console.error('Automatic database backup failed', error);
+    } finally {
+      DatabaseManager.backupInProgress = false;
+    }
+  }
+
+  private enforceBackupRetention(): void {
+    let entries: Array<{ path: string; createdAt: number }>; // ensure scope typed
+    try {
+      entries = fs
+        .readdirSync(this.backupDir)
+        .filter((entry) => entry.toLowerCase().endsWith('.db'))
+        .map((entry) => {
+          const fullPath = path.join(this.backupDir, entry);
+          try {
+            const stats = fs.statSync(fullPath);
+            const createdAt = stats.birthtimeMs || stats.mtimeMs || 0;
+            return { path: fullPath, createdAt };
+          } catch (error) {
+            console.warn('Failed to inspect backup file', fullPath, error);
+            return null;
+          }
+        })
+        .filter((value): value is { path: string; createdAt: number } => Boolean(value))
+        .sort((a, b) => b.createdAt - a.createdAt);
+    } catch (error) {
+      console.warn('Failed to enumerate backup files for retention', error);
+      return;
+    }
+
+    entries.forEach((entry, index) => {
+      const tooMany = index >= BACKUP_RETENTION_COUNT;
+      const tooOld = Date.now() - entry.createdAt > BACKUP_RETENTION_MAX_AGE_MS;
+      if (!tooMany && !tooOld) {
+        return;
+      }
+
+      try {
+        fs.unlinkSync(entry.path);
+      } catch (error) {
+        console.warn('Failed to remove outdated backup', entry.path, error);
+      }
+    });
+  }
+
+  private formatBackupTimestamp(date: Date): string {
+    const pad = (value: number) => value.toString().padStart(2, '0');
+    const year = date.getFullYear();
+    const month = pad(date.getMonth() + 1);
+    const day = pad(date.getDate());
+    const hours = pad(date.getHours());
+    const minutes = pad(date.getMinutes());
+    const seconds = pad(date.getSeconds());
+    return `${year}${month}${day}-${hours}${minutes}${seconds}`;
   }
 
   private async withDatabase<T>(

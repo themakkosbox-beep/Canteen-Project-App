@@ -16,6 +16,7 @@ extraResources:
     to: app-package.json
   - from: ../node_modules/sql.js
     to: .next/standalone/node_modules/sql.js
+artifactName: Camp-Canteen-POS-${version}-${os}-${arch}.${ext}
 win:
   icon: app-icon.ico
   target:
@@ -25,6 +26,7 @@ nsis:
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
+  artifactName: Camp-Canteen-POS-Setup-${version}.${ext}
 publish:
   - provider: github
     owner: themakkosbox-beep

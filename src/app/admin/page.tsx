@@ -1143,91 +1143,6 @@ export default function AdminPage() {
           </div>
         )}
 
-        <section className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <div className="bg-white rounded-lg shadow p-6 space-y-4">
-            <div>
-              <h2 className="text-xl font-semibold">POS Quick Keys</h2>
-              <p className="text-sm text-gray-600">
-                Choose up to five products for the one-tap buttons shown on the POS terminal.
-              </p>
-            </div>
-            {loadingQuickKeys ? (
-              <p className="text-gray-500">Loading quick key settings…</p>
-            ) : (
-              <div className="space-y-4">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {quickKeySlots.map((slot) => (
-                    <div key={slot.index}>
-                      <label className="block text-sm font-medium text-gray-700">
-                        Quick Key {slot.index + 1}
-                      </label>
-                      <div className="mt-1 flex gap-2">
-                        <select
-                          value={slot.productId ?? ''}
-                          onChange={(event) => handleQuickKeyChange(slot.index, event.target.value)}
-                          className="pos-input flex-1"
-                        >
-                          <option value="">— Unassigned —</option>
-                          {quickKeyOptions.map((product) => (
-                            <option key={product.product_id} value={product.product_id}>
-                              {product.name} ({currencyFormatter.format(product.price)})
-                            </option>
-                          ))}
-                        </select>
-                        <button
-                          type="button"
-                          onClick={() => handleClearQuickKey(slot.index)}
-                          className="bg-gray-200 text-gray-700 font-semibold px-3 py-2 rounded-lg hover:bg-gray-300 transition-colors"
-                        >
-                          Clear
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={handleSaveQuickKeys}
-                    disabled={savingQuickKeys || loadingQuickKeys}
-                    className="pos-button"
-                  >
-                    {savingQuickKeys ? 'Saving…' : 'Save Quick Keys'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleResetQuickKeys}
-                    className="bg-gray-300 text-gray-800 font-semibold py-3 px-6 rounded-lg"
-                    disabled={savingQuickKeys || loadingQuickKeys}
-                  >
-                    Reset
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-
-          <div className="bg-white rounded-lg shadow p-6 space-y-4">
-            <div>
-              <h2 className="text-xl font-semibold">Data Tools</h2>
-              <p className="text-sm text-gray-600">
-                Download a CSV containing every transaction with timestamps, customer details, and line items.
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={exportTransactionsToCsv}
-              disabled={exportingTransactions}
-              className="pos-button w-full sm:w-auto"
-            >
-              {exportingTransactions ? 'Preparing…' : 'Export Transactions to CSV'}
-            </button>
-            <p className="text-xs text-gray-500">
-              The export includes date, time, customer info, product details, and balance impact for each entry.
-            </p>
-          </div>
-        </section>
-
         <section className="bg-white rounded-lg shadow p-6 space-y-6">
           <div>
             <h2 className="text-xl font-semibold mb-2">
@@ -1856,6 +1771,135 @@ export default function AdminPage() {
             )}
           </div>
         </section>
+
+        <section className="bg-white rounded-lg shadow p-6 space-y-6">
+          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div>
+              <h2 className="text-xl font-semibold">POS Quick Keys</h2>
+              <p className="text-sm text-gray-600">
+                Assign up to five fast-access buttons so the register can ring top sellers in one tap.
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={handleResetQuickKeys}
+                className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700 hover:border-camp-500 disabled:opacity-50"
+                disabled={savingQuickKeys || loadingQuickKeys}
+              >
+                Reset Slots
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveQuickKeys}
+                className="pos-button"
+                disabled={savingQuickKeys || loadingQuickKeys}
+              >
+                {savingQuickKeys ? 'Saving…' : 'Save Quick Keys'}
+              </button>
+            </div>
+          </div>
+          {loadingQuickKeys ? (
+            <p className="text-gray-500">Loading quick key slots…</p>
+          ) : (
+            <div className="grid gap-4 md:grid-cols-5">
+              {quickKeySlots.map((slot) => (
+                <div key={slot.index} className="rounded-lg border border-gray-200 p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                      Slot {slot.index + 1}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleClearQuickKey(slot.index)}
+                      className="text-xs font-semibold text-red-600 hover:underline disabled:text-red-300"
+                      disabled={!slot.productId || savingQuickKeys}
+                    >
+                      Clear
+                    </button>
+                  </div>
+                  <select
+                    value={slot.productId ?? ''}
+                    onChange={(event) => handleQuickKeyChange(slot.index, event.target.value)}
+                    className="pos-input w-full"
+                    disabled={savingQuickKeys}
+                  >
+                    <option value="">Choose a product…</option>
+                    {quickKeyOptions.map((product) => (
+                      <option key={product.product_id} value={product.product_id}>
+                        {product.name} ({currencyFormatter.format(product.price)})
+                      </option>
+                    ))}
+                  </select>
+                  <div className="rounded-md border border-dashed border-gray-300 bg-gray-50 p-3 text-sm text-gray-600">
+                    {slot.product ? (
+                      <div className="space-y-1">
+                        <p className="font-semibold text-gray-800">{slot.product.name}</p>
+                        <p>{currencyFormatter.format(slot.product.price)}</p>
+                        {slot.product.category ? (
+                          <p className="text-xs uppercase tracking-wide text-gray-500">
+                            {slot.product.category}
+                          </p>
+                        ) : null}
+                      </div>
+                    ) : slot.productId ? (
+                      <p>Product not found—double-check that it still exists.</p>
+                    ) : (
+                      <p>Select a product to assign this quick key.</p>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          <p className="text-xs text-gray-500">
+            Saved quick keys refresh the next time the POS opens the register view.
+          </p>
+        </section>
+
+        <section className="bg-white rounded-lg shadow p-6 space-y-6">
+          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div>
+              <h2 className="text-xl font-semibold">Data Tools</h2>
+              <p className="text-sm text-gray-600">
+                Download reports and review automated maintenance for peace of mind.
+              </p>
+            </div>
+          </div>
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="rounded-lg border border-gray-200 p-4 space-y-3">
+              <div>
+                <h3 className="text-base font-semibold text-gray-800">Transaction Export</h3>
+                <p className="text-sm text-gray-600">
+                  Generate a CSV snapshot of deposits, purchases, and running balances.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={exportTransactionsToCsv}
+                className="pos-button w-full md:w-auto"
+                disabled={exportingTransactions}
+              >
+                {exportingTransactions ? 'Preparing…' : 'Download CSV'}
+              </button>
+            </div>
+            <div className="rounded-lg border border-gray-200 p-4 space-y-3">
+              <div>
+                <h3 className="text-base font-semibold text-gray-800">Nightly Backups</h3>
+                <p className="text-sm text-gray-600">
+                  Backups run automatically every 24 hours and keep recent copies in the data folder.
+                </p>
+              </div>
+              <p className="text-xs text-gray-500">
+                Need a sanity check? Open the Canteen data directory to confirm the latest timestamped archive.
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <footer className="text-xs text-gray-500 text-center pb-2">
+          Run <code className="font-mono bg-gray-100 px-1 py-0.5 rounded">npm run test:e2e</code> before packaging a release to confirm database writes end-to-end.
+        </footer>
       </div>
     </div>
   );

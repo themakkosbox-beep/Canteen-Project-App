@@ -9,7 +9,15 @@ import {
   SparklesIcon,
 } from '@heroicons/react/24/outline';
 import Fuse from 'fuse.js';
-import { Customer, Product, QuickKeySlot, TransactionLog } from '@/types/database';
+import {
+  Customer,
+  Product,
+  ProductOptionGroup,
+  ProductOptionSelection,
+  QuickKeySlot,
+  TransactionLog,
+  TransactionOptionSelection,
+} from '@/types/database';
 
 interface POSState {
   currentCustomer: Customer | null;
@@ -35,6 +43,184 @@ interface BarcodeLearnModalState {
 
 const QUICK_KEY_COUNT = 5;
 const MAX_TRAINING_TRANSACTIONS = 25;
+
+type PurchaseTrigger = {
+  productId?: string;
+  barcode?: string;
+};
+
+type OptionSelectionMap = Record<string, string[]>;
+
+interface OptionModalState {
+  open: boolean;
+  product: Product | null;
+  trigger: PurchaseTrigger | null;
+  selections: OptionSelectionMap;
+  error: string | null;
+  submitting: boolean;
+}
+
+interface OptionEvaluationResult {
+  productSelections: ProductOptionSelection[];
+  transactionSelections: TransactionOptionSelection[];
+  totalDelta: number;
+  missingRequired: string[];
+}
+
+const roundCurrency = (value: number): number => Math.round(value * 100) / 100;
+
+const createEmptyOptionModalState = (): OptionModalState => ({
+  open: false,
+  product: null,
+  trigger: null,
+  selections: {},
+  error: null,
+  submitting: false,
+});
+
+const createInitialSelectionMap = (product: Product | null): OptionSelectionMap => {
+  const map: OptionSelectionMap = {};
+  if (!product || !Array.isArray(product.options)) {
+    return map;
+  }
+
+  product.options.forEach((group) => {
+    if (!group || typeof group.id !== 'string') {
+      return;
+    }
+
+    if (group.required && !group.multiple && group.choices.length === 1) {
+      const firstChoice = group.choices[0];
+      if (firstChoice && typeof firstChoice.id === 'string') {
+        map[group.id] = [firstChoice.id];
+        return;
+      }
+    }
+
+    map[group.id] = [];
+  });
+
+  return map;
+};
+
+const buildSelectionMapFromProductSelections = (
+  product: Product,
+  selections?: ProductOptionSelection[] | null
+): OptionSelectionMap => {
+  const map: OptionSelectionMap = {};
+  if (!product || !Array.isArray(product.options)) {
+    return map;
+  }
+
+  product.options.forEach((group) => {
+    if (!group || typeof group.id !== 'string') {
+      return;
+    }
+    map[group.id] = [];
+  });
+
+  if (!Array.isArray(selections)) {
+    return map;
+  }
+
+  selections.forEach((selection) => {
+    if (!selection || typeof selection.groupId !== 'string') {
+      return;
+    }
+    if (!Array.isArray(selection.choiceIds)) {
+      return;
+    }
+
+    if (!(selection.groupId in map)) {
+      return;
+    }
+
+    map[selection.groupId] = selection.choiceIds.filter(
+      (id) => typeof id === 'string' && id.trim().length > 0
+    );
+  });
+
+  return map;
+};
+
+const evaluateOptionSelections = (
+  product: Product,
+  selectionMap: OptionSelectionMap
+): OptionEvaluationResult => {
+  const groups = Array.isArray(product.options) ? product.options : [];
+  const productSelections: ProductOptionSelection[] = [];
+  const transactionSelections: TransactionOptionSelection[] = [];
+  const missingRequired: string[] = [];
+  let totalDelta = 0;
+
+  groups.forEach((group) => {
+    if (!group || typeof group.id !== 'string') {
+      return;
+    }
+
+    const selectedIds = Array.isArray(selectionMap[group.id]) ? selectionMap[group.id] : [];
+    const normalized: string[] = [];
+    const resolvedChoices: TransactionOptionSelection['choices'] = [];
+    const seen = new Set<string>();
+
+    for (const rawId of selectedIds) {
+      if (typeof rawId !== 'string') {
+        continue;
+      }
+      const trimmed = rawId.trim();
+      if (!trimmed || seen.has(trimmed)) {
+        continue;
+      }
+      const match = group.choices.find((choice) => choice.id === trimmed);
+      if (!match) {
+        continue;
+      }
+
+      normalized.push(match.id);
+      resolvedChoices.push({
+        id: match.id,
+        label: match.label,
+        priceDelta:
+          typeof match.priceDelta === 'number' && Number.isFinite(match.priceDelta)
+            ? match.priceDelta
+            : 0,
+      });
+      seen.add(trimmed);
+
+      if (!group.multiple) {
+        break;
+      }
+    }
+
+    if (group.required && normalized.length === 0) {
+      missingRequired.push(group.name);
+    }
+
+    if (normalized.length === 0) {
+      return;
+    }
+
+    const groupDelta = resolvedChoices.reduce((sum, choice) => sum + choice.priceDelta, 0);
+    totalDelta += groupDelta;
+
+    productSelections.push({ groupId: group.id, choiceIds: normalized });
+    transactionSelections.push({
+      groupId: group.id,
+      groupName: group.name,
+      multiple: group.multiple,
+      required: group.required,
+      choices: resolvedChoices,
+      delta: groupDelta,
+    });
+  });
+
+  return {
+    productSelections,
+    transactionSelections,
+    totalDelta,
+    missingRequired,
+  };
+};
 
 const TRAINING_CUSTOMER_PRESETS: Array<{ id: string; name: string; balance: number }> = [
   { id: '9100', name: 'Training Camper Alpha', balance: 25 },
@@ -117,6 +303,9 @@ export default function POSPage() {
   const [creatingLearnProduct, setCreatingLearnProduct] = useState(false);
   const [currentTime, setCurrentTime] = useState(() => new Date());
   const [deletingTransactionId, setDeletingTransactionId] = useState<string | null>(null);
+  const [optionModalState, setOptionModalState] = useState<OptionModalState>(() =>
+    createEmptyOptionModalState()
+  );
 
   const entryInputRef = useRef<HTMLInputElement>(null);
 
@@ -124,6 +313,34 @@ export default function POSPage() {
     () => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }),
     []
   );
+
+  const optionPreview = useMemo<OptionEvaluationResult>(() => {
+    if (!optionModalState.product) {
+      return {
+        productSelections: [],
+        transactionSelections: [],
+        totalDelta: 0,
+        missingRequired: [],
+      };
+    }
+    return evaluateOptionSelections(optionModalState.product, optionModalState.selections);
+  }, [optionModalState.product, optionModalState.selections]);
+
+  const optionMissingGroups = useMemo(() => {
+    return new Set(optionPreview.missingRequired);
+  }, [optionPreview.missingRequired]);
+
+  const optionEstimatedTotal = useMemo(() => {
+    if (!optionModalState.product) {
+      return 0;
+    }
+    return roundCurrency(optionModalState.product.price + optionPreview.totalDelta);
+  }, [optionModalState.product, optionPreview.totalDelta]);
+
+  const optionConfirmDisabled = useMemo(() => {
+    const hasSelectableOptions = (optionModalState.product?.options?.length ?? 0) > 0;
+    return optionModalState.submitting || (hasSelectableOptions && optionPreview.missingRequired.length > 0);
+  }, [optionModalState.product, optionModalState.submitting, optionPreview.missingRequired.length]);
 
   const fuse = useMemo(() => {
     if (products.length === 0) {
@@ -177,6 +394,7 @@ export default function POSPage() {
       setTrainingCustomers(buildPresetTrainingCustomers());
     }
     setActiveTrainingCustomerId(null);
+    setOptionModalState(createEmptyOptionModalState());
   }, [trainingMode]);
 
   useEffect(() => {
@@ -288,6 +506,76 @@ export default function POSPage() {
     }
   };
 
+  const describeTransactionOptions = (options?: TransactionOptionSelection[] | null) => {
+    if (!Array.isArray(options) || options.length === 0) {
+      return '';
+    }
+
+    return options
+      .map((group) => {
+        const labels = group.choices.map((choice) => choice.label).join(', ');
+        const deltaLabel =
+          group.delta && group.delta !== 0
+            ? ` (${group.delta > 0 ? '+' : '-'}${formatCurrency(Math.abs(group.delta))})`
+            : '';
+        return `${group.groupName}: ${labels}${deltaLabel}`;
+      })
+      .join('; ');
+  };
+
+  const openOptionModal = (product: Product, trigger: PurchaseTrigger) => {
+    setOptionModalState({
+      open: true,
+      product,
+      trigger,
+      selections: createInitialSelectionMap(product),
+      error: null,
+      submitting: false,
+    });
+  };
+
+  const closeOptionModal = () => {
+    setOptionModalState((prev) => {
+      if (prev.submitting) {
+        return prev;
+      }
+      return createEmptyOptionModalState();
+    });
+  };
+
+  const toggleOptionChoice = (group: ProductOptionGroup, choiceId: string) => {
+    setOptionModalState((prev) => {
+      if (!prev.product || prev.submitting || typeof group.id !== 'string') {
+        return prev;
+      }
+
+      const trimmed = typeof choiceId === 'string' ? choiceId.trim() : '';
+      if (!trimmed) {
+        return prev;
+      }
+
+      const current = Array.isArray(prev.selections[group.id]) ? prev.selections[group.id] : [];
+      let next: string[];
+
+      if (group.multiple) {
+        next = current.includes(trimmed)
+          ? current.filter((id) => id !== trimmed)
+          : [...current, trimmed];
+      } else {
+        next = current.includes(trimmed) ? [] : [trimmed];
+      }
+
+      return {
+        ...prev,
+        error: null,
+        selections: {
+          ...prev.selections,
+          [group.id]: next,
+        },
+      };
+    });
+  };
+
   const loadCustomer = async (customerId: string) => {
     const trimmed = customerId.trim();
     if (trimmed.length !== 4) {
@@ -366,12 +654,16 @@ export default function POSPage() {
   const handlePurchase = async ({
     barcode,
     productId,
+    selectedOptions,
+    productOverride,
   }: {
     barcode?: string;
     productId?: string;
-  }) => {
+    selectedOptions?: ProductOptionSelection[] | null;
+    productOverride?: Product | null;
+  }): Promise<boolean> => {
     if (!state.currentCustomer || (!barcode && !productId)) {
-      return;
+      return false;
     }
 
     const customerId = state.currentCustomer.customer_id;
@@ -381,23 +673,51 @@ export default function POSPage() {
       const entry = trainingCustomers[customerId];
       if (!entry) {
         setState((prev) => ({ ...prev, isLoading: false, error: 'Training customer not found' }));
-        return;
+        return false;
       }
 
-      const product = productId
-        ? resolveProductById(productId)
-        : barcode
-        ? resolveProductByBarcode(barcode)
-        : null;
+      const product =
+        productOverride ??
+        (productId
+          ? resolveProductById(productId)
+          : barcode
+          ? resolveProductByBarcode(barcode)
+          : null);
 
       if (!product) {
         setState((prev) => ({ ...prev, isLoading: false, error: 'Product not found' }));
-        return;
+        return false;
       }
 
-      if (entry.customer.balance < product.price) {
+      const selectionMap = buildSelectionMapFromProductSelections(product, selectedOptions);
+      const evaluation = evaluateOptionSelections(product, selectionMap);
+      const hasOptions = Array.isArray(product.options) && product.options.length > 0;
+
+      if (hasOptions && evaluation.missingRequired.length > 0) {
+        const uniqueGroups = Array.from(new Set(evaluation.missingRequired));
+        const message =
+          uniqueGroups.length === 1
+            ? `Select an option for ${uniqueGroups[0]}.`
+            : `Select options for ${uniqueGroups.join(', ')}.`;
+        setState((prev) => ({ ...prev, isLoading: false, error: message }));
+        return false;
+      }
+
+      const currentBalance = roundCurrency(entry.customer.balance);
+      const basePrice = roundCurrency(product.price);
+      const optionsDelta = roundCurrency(evaluation.totalDelta);
+      const finalPrice = roundCurrency(basePrice + optionsDelta);
+
+      if (currentBalance + 0.00001 < finalPrice) {
         setState((prev) => ({ ...prev, isLoading: false, error: 'Insufficient balance' }));
-        return;
+        return false;
+      }
+
+      let amount = finalPrice === 0 ? 0 : -finalPrice;
+      amount = roundCurrency(amount);
+      let newBalance = roundCurrency(currentBalance + amount);
+      if (Object.is(newBalance, -0)) {
+        newBalance = 0;
       }
 
       const timestamp = new Date().toISOString();
@@ -407,12 +727,15 @@ export default function POSPage() {
         customer_id: customerId,
         type: 'purchase',
         product_id: product.product_id,
-        amount: -product.price,
-        balance_after: entry.customer.balance - product.price,
+        amount,
+        balance_after: newBalance,
         note: undefined,
         timestamp,
         staff_id: undefined,
         product_name: product.name,
+        options: evaluation.transactionSelections.length
+          ? evaluation.transactionSelections
+          : undefined,
       };
 
       updateTrainingEntry(customerId, (current) => ({
@@ -421,18 +744,24 @@ export default function POSPage() {
         autoBalance: current.autoBalance,
       }));
       clearEntryInput();
-      return;
+      return true;
     }
 
     try {
+      const payload = {
+        customerId,
+        barcode,
+        productId,
+        selectedOptions:
+          Array.isArray(selectedOptions) && selectedOptions.length > 0
+            ? selectedOptions
+            : undefined,
+      };
+
       const response = await fetch('/api/transactions/purchase', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          customerId,
-          barcode,
-          productId,
-        }),
+        body: JSON.stringify(payload),
       });
 
       if (!response.ok) {
@@ -449,7 +778,7 @@ export default function POSPage() {
             error: null,
           });
           setState((prev) => ({ ...prev, isLoading: false }));
-          return;
+          return false;
         }
 
         throw new Error(message);
@@ -457,12 +786,60 @@ export default function POSPage() {
 
       await loadCustomer(customerId);
       clearEntryInput();
+      return true;
     } catch (error) {
       setState((prev) => ({
         ...prev,
         isLoading: false,
         error: error instanceof Error ? error.message : 'Purchase failed',
       }));
+      return false;
+    }
+  };
+
+  const startProductPurchase = (product: Product, trigger: PurchaseTrigger) => {
+    if (!state.currentCustomer || state.isLoading) {
+      return;
+    }
+
+    if (Array.isArray(product.options) && product.options.length > 0) {
+      openOptionModal(product, trigger);
+      return;
+    }
+
+    void handlePurchase({ ...trigger, productOverride: product });
+  };
+
+  const handleOptionModalConfirm = async () => {
+    if (!optionModalState.product || !optionModalState.trigger || state.isLoading) {
+      return;
+    }
+
+    const evaluation = evaluateOptionSelections(optionModalState.product, optionModalState.selections);
+    const hasOptions =
+      Array.isArray(optionModalState.product.options) && optionModalState.product.options.length > 0;
+
+    if (hasOptions && evaluation.missingRequired.length > 0) {
+      const uniqueGroups = Array.from(new Set(evaluation.missingRequired));
+      const message =
+        uniqueGroups.length === 1
+          ? `Select an option for ${uniqueGroups[0]}.`
+          : `Select options for ${uniqueGroups.join(', ')}.`;
+      setOptionModalState((prev) => ({ ...prev, error: message }));
+      return;
+    }
+
+    setOptionModalState((prev) => ({ ...prev, submitting: true, error: null }));
+    const success = await handlePurchase({
+      ...optionModalState.trigger,
+      selectedOptions: evaluation.productSelections,
+      productOverride: optionModalState.product,
+    });
+
+    if (success) {
+      setOptionModalState(createEmptyOptionModalState());
+    } else {
+      setOptionModalState((prev) => ({ ...prev, submitting: false }));
     }
   };
 
@@ -470,7 +847,7 @@ export default function POSPage() {
     if (!selectedProduct || !state.currentCustomer || state.isLoading) {
       return;
     }
-    void handlePurchase({ productId: selectedProduct.product_id });
+    startProductPurchase(selectedProduct, { productId: selectedProduct.product_id });
     setShowProductDropdown(false);
   };
 
@@ -630,7 +1007,7 @@ export default function POSPage() {
     }
 
     setSelectedProduct(product);
-    void handlePurchase({ productId: slot.productId });
+    startProductPurchase(product, { productId: product.product_id });
   };
 
   const handlePrimaryCharge = () => {
@@ -645,14 +1022,16 @@ export default function POSPage() {
 
     const barcodeMatch = resolveProductByBarcode(trimmed);
     if (barcodeMatch) {
-      void handlePurchase({ barcode: trimmed });
+      setShowProductDropdown(false);
+      startProductPurchase(barcodeMatch, { barcode: trimmed });
       return;
     }
 
     const productMatch = resolveProductById(trimmed);
     if (productMatch) {
       setSelectedProduct(productMatch);
-      void handlePurchase({ productId: productMatch.product_id });
+      setShowProductDropdown(false);
+      startProductPurchase(productMatch, { productId: productMatch.product_id });
       return;
     }
 
@@ -794,7 +1173,17 @@ export default function POSPage() {
     }
 
     const rows = [
-      ['Transaction ID', 'Type', 'Amount', 'Balance After', 'Timestamp', 'Product', 'Note', 'Staff'],
+      [
+        'Transaction ID',
+        'Type',
+        'Amount',
+        'Balance After',
+        'Timestamp',
+        'Product',
+        'Note',
+        'Staff',
+        'Options',
+      ],
       ...state.recentTransactions.map((transaction) => [
         transaction.transaction_id ?? '',
         transaction.type,
@@ -804,6 +1193,7 @@ export default function POSPage() {
         transaction.product_name ?? '',
         transaction.note ?? '',
         transaction.staff_id ?? '',
+        describeTransactionOptions(transaction.options),
       ]),
     ];
 
@@ -1414,6 +1804,21 @@ export default function POSPage() {
                             {transaction.note ? (
                               <p className="text-xs text-gray-500">{transaction.note}</p>
                             ) : null}
+                            {Array.isArray(transaction.options) && transaction.options.length ? (
+                              <div className="mt-2 space-y-1">
+                                {transaction.options.map((option) => (
+                                  <p key={option.groupId} className="text-xs text-gray-500">
+                                    <span className="font-semibold text-gray-600">{option.groupName}:</span>{' '}
+                                    {option.choices.map((choice) => choice.label).join(', ')}
+                                    {option.delta !== 0
+                                      ? ` (${option.delta > 0 ? '+' : '-'}${formatCurrency(
+                                          Math.abs(option.delta)
+                                        )})`
+                                      : ''}
+                                  </p>
+                                ))}
+                              </div>
+                            ) : null}
                           </div>
                           <div className="flex flex-col items-end gap-2 text-right sm:flex-row sm:items-center sm:gap-3">
                             <span
@@ -1489,6 +1894,132 @@ export default function POSPage() {
           </aside>
         </div>
       </main>
+
+      <Dialog open={optionModalState.open} onClose={closeOptionModal}>
+        <div className="fixed inset-0 bg-black/40" aria-hidden="true" />
+        <div className="fixed inset-0 flex items-center justify-center p-4">
+          <Dialog.Panel className="w-full max-w-xl rounded-xl bg-white p-6 shadow-xl">
+            {optionModalState.product ? (
+              <>
+                <Dialog.Title className="text-lg font-semibold text-gray-900">
+                  Customize {optionModalState.product.name}
+                </Dialog.Title>
+                <Dialog.Description className="mt-1 text-sm text-gray-500">
+                  Choose the applicable options before completing this purchase.
+                </Dialog.Description>
+
+                <div className="mt-4 space-y-4">
+                  {optionModalState.product.options?.map((group) => {
+                    const groupId = group.id;
+                    const selectedIds = Array.isArray(optionModalState.selections[groupId])
+                      ? optionModalState.selections[groupId]
+                      : [];
+                    const missing = optionMissingGroups.has(group.name);
+
+                    return (
+                      <div key={groupId} className="rounded-lg border border-gray-200 p-4">
+                        <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                          <p className="text-sm font-semibold text-gray-800">{group.name}</p>
+                          <div className="flex items-center gap-2 text-xs">
+                            {group.required ? (
+                              <span className={missing ? 'font-semibold text-red-600' : 'font-semibold text-camp-600'}>
+                                Required
+                              </span>
+                            ) : (
+                              <span className="text-gray-400">Optional</span>
+                            )}
+                            {group.multiple ? (
+                              <span className="rounded-full bg-gray-100 px-2 py-0.5 text-gray-600">
+                                Multiple
+                              </span>
+                            ) : null}
+                          </div>
+                        </div>
+                        <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                          {group.choices.map((choice) => {
+                            const delta =
+                              typeof choice.priceDelta === 'number' && Number.isFinite(choice.priceDelta)
+                                ? choice.priceDelta
+                                : 0;
+                            const isSelected = selectedIds.includes(choice.id);
+                            return (
+                              <button
+                                key={choice.id}
+                                className={`flex flex-col items-start rounded-lg border px-3 py-2 text-left text-sm transition ${
+                                  isSelected
+                                    ? 'border-camp-500 bg-camp-50 text-camp-700 shadow'
+                                    : 'border-gray-200 bg-white text-gray-700 hover:border-camp-400'
+                                }`}
+                                disabled={optionModalState.submitting}
+                                onClick={() => toggleOptionChoice(group, choice.id)}
+                                type="button"
+                              >
+                                <span className="font-medium">{choice.label}</span>
+                                <span className="text-xs text-gray-500">
+                                  {delta === 0
+                                    ? 'No change'
+                                    : delta > 0
+                                    ? `+${formatCurrency(delta)}`
+                                    : `-${formatCurrency(Math.abs(delta))}`}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {optionModalState.error ? (
+                  <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                    {optionModalState.error}
+                  </div>
+                ) : null}
+
+                <div className="mt-6 rounded-lg bg-gray-50 px-4 py-3 text-sm">
+                  <div className="flex items-center justify-between">
+                    <span>Base Price</span>
+                    <span>{formatCurrency(optionModalState.product.price)}</span>
+                  </div>
+                  <div className="mt-1 flex items-center justify-between">
+                    <span>Options</span>
+                    <span className={optionPreview.totalDelta >= 0 ? 'text-camp-600' : 'text-red-600'}>
+                      {optionPreview.totalDelta >= 0 ? '+' : '-'}
+                      {formatCurrency(Math.abs(optionPreview.totalDelta))}
+                    </span>
+                  </div>
+                  <div className="mt-2 flex items-center justify-between border-t border-gray-200 pt-2 text-sm font-semibold text-gray-800">
+                    <span>Estimated Total</span>
+                    <span>{formatCurrency(optionEstimatedTotal)}</span>
+                  </div>
+                </div>
+
+                <div className="mt-6 flex items-center justify-end gap-3">
+                  <button
+                    className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-600 shadow hover:border-camp-500"
+                    disabled={optionModalState.submitting}
+                    onClick={closeOptionModal}
+                    type="button"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="rounded-lg bg-camp-600 px-4 py-2 text-sm font-semibold text-white shadow hover:bg-camp-700 disabled:opacity-70"
+                    disabled={optionConfirmDisabled}
+                    onClick={() => void handleOptionModalConfirm()}
+                    type="button"
+                  >
+                    {optionModalState.submitting
+                      ? 'Charging…'
+                      : `Charge ${formatCurrency(optionEstimatedTotal)}`}
+                  </button>
+                </div>
+              </>
+            ) : null}
+          </Dialog.Panel>
+        </div>
+      </Dialog>
 
       <Dialog open={learnModalState.open} onClose={closeLearnModal}>
         <div className="fixed inset-0 bg-black/40" aria-hidden="true" />
