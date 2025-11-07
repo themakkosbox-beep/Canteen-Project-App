@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">Camp Canteen POS Logo</title>
+  <desc id="desc">Circular badge with stylized camp and register iconography.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f766e" />
+      <stop offset="100%" stop-color="#22d3ee" />
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#fcd34d" />
+      <stop offset="100%" stop-color="#fb923c" />
+    </linearGradient>
+  </defs>
+  <circle cx="64" cy="64" r="60" fill="url(#bg)" />
+  <path d="M26 82c0-11.6 10-21 22.8-21H64" fill="none" stroke="#ecfeff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" />
+  <path d="M102 82c0-11.6-10-21-22.8-21H64" fill="none" stroke="#ecfeff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" />
+  <path d="M46 66l18-26 18 26" fill="none" stroke="#ecfeff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" />
+  <rect x="52" y="74" width="24" height="20" rx="4" fill="#ecfeff" />
+  <rect x="56" y="78" width="16" height="4" rx="2" fill="url(#accent)" />
+  <rect x="56" y="86" width="6" height="4" rx="1.5" fill="#0f766e" />
+  <rect x="66" y="86" width="6" height="4" rx="1.5" fill="#0f766e" />
+</svg>

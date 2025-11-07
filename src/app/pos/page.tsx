@@ -275,7 +275,6 @@ export default function POSPage() {
   const [state, setState] = useState<POSState>({ ...INITIAL_POS_STATE });
   const [customerIdInput, setCustomerIdInput] = useState('');
   const [entryInput, setEntryInput] = useState('');
-  const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [showProductDropdown, setShowProductDropdown] = useState(false);
   const [products, setProducts] = useState<Product[]>([]);
   const [productsLoading, setProductsLoading] = useState(false);
@@ -387,8 +386,7 @@ export default function POSPage() {
     setEntryInput('');
     setDepositAmount('');
     setAdjustmentAmount('');
-    setNote('');
-    setSelectedProduct(null);
+  setNote('');
     setShowAdjustmentForm(false);
     if (trainingMode) {
       setTrainingCustomers(buildPresetTrainingCustomers());
@@ -499,8 +497,8 @@ export default function POSPage() {
 
   const clearEntryInput = () => {
     setEntryInput('');
-    setSelectedProduct(null);
     setShowProductDropdown(false);
+    setState((prev) => ({ ...prev, error: null }));
     if (entryInputRef.current) {
       entryInputRef.current.focus();
     }
@@ -843,14 +841,6 @@ export default function POSPage() {
     }
   };
 
-  const handleSelectedProductPurchase = () => {
-    if (!selectedProduct || !state.currentCustomer || state.isLoading) {
-      return;
-    }
-    startProductPurchase(selectedProduct, { productId: selectedProduct.product_id });
-    setShowProductDropdown(false);
-  };
-
   const processDeposit = async () => {
     if (!state.currentCustomer || !depositAmount) {
       return;
@@ -1006,7 +996,6 @@ export default function POSPage() {
       return;
     }
 
-    setSelectedProduct(product);
     startProductPurchase(product, { productId: product.product_id });
   };
 
@@ -1029,19 +1018,22 @@ export default function POSPage() {
 
     const productMatch = resolveProductById(trimmed);
     if (productMatch) {
-      setSelectedProduct(productMatch);
       setShowProductDropdown(false);
       startProductPurchase(productMatch, { productId: productMatch.product_id });
       return;
     }
 
-    if (selectedProduct) {
-      void handleSelectedProductPurchase();
+    const firstSuggestion = productSuggestions[0];
+    if (firstSuggestion) {
+      setShowProductDropdown(false);
+      setEntryInput(firstSuggestion.name);
+      setState((prev) => ({ ...prev, error: null }));
+      startProductPurchase(firstSuggestion, { productId: firstSuggestion.product_id });
       return;
     }
 
-    setSelectedProduct(null);
     setShowProductDropdown(true);
+    setState((prev) => ({ ...prev, error: 'Product not found. Try a suggestion below.' }));
   };
 
   const handleDeleteTransaction = async (transaction: TransactionLog) => {
@@ -1134,7 +1126,6 @@ export default function POSPage() {
       await loadQuickKeys();
       setLearnModalState({ open: false, barcode: '', name: '', price: '', category: '', error: null });
       setEntryInput(product.name);
-      setSelectedProduct(product);
       setShowProductDropdown(false);
 
       if (state.currentCustomer) {
@@ -1396,9 +1387,7 @@ export default function POSPage() {
                           const value = event.target.value;
                           setEntryInput(value);
                           setShowProductDropdown(true);
-                          if (!value.trim()) {
-                            setSelectedProduct(null);
-                          }
+                          setState((prev) => ({ ...prev, error: null }));
                         }}
                         onFocus={() => setShowProductDropdown(true)}
                         onKeyDown={(event) => {
@@ -1434,9 +1423,13 @@ export default function POSPage() {
                             key={product.product_id}
                             className="flex w-full items-center justify-between px-4 py-2 text-left text-sm hover:bg-camp-50"
                             onClick={() => {
-                              setSelectedProduct(product);
+                              if (!state.currentCustomer || state.isLoading) {
+                                return;
+                              }
                               setEntryInput(product.name);
                               setShowProductDropdown(false);
+                              setState((prev) => ({ ...prev, error: null }));
+                              startProductPurchase(product, { productId: product.product_id });
                             }}
                             type="button"
                           >
@@ -1485,35 +1478,17 @@ export default function POSPage() {
                     ))}
                   </div>
                   <div className="flex flex-col gap-3 rounded-lg border border-gray-200 bg-gray-50 p-3 sm:flex-row sm:items-center sm:justify-between">
-                    <div>
-                      <p className="text-sm font-semibold text-gray-800">
-                        {selectedProduct ? selectedProduct.name : 'No product selected'}
-                      </p>
-                      <p className="text-xs text-gray-500">
-                        {selectedProduct
-                          ? `Price: ${formatCurrency(selectedProduct.price)}`
-                          : 'Use a suggestion, filter, or quick key to pick an item.'}
-                      </p>
-                    </div>
-                    <div className="flex flex-1 flex-col gap-2 sm:flex-row sm:justify-end">
-                      <button
-                        className="rounded-lg bg-camp-600 px-4 py-2 font-semibold text-white shadow hover:bg-camp-700"
-                        disabled={!selectedProduct || !state.currentCustomer || state.isLoading}
-                        onClick={handleSelectedProductPurchase}
-                        type="button"
-                      >
-                        Charge Selected
-                        {selectedProduct ? ` (${formatCurrency(selectedProduct.price)})` : ''}
-                      </button>
-                      <button
-                        className="rounded-lg border border-gray-300 px-4 py-2 font-semibold text-gray-600 shadow hover:border-camp-500"
-                        disabled={state.isLoading}
-                        onClick={clearEntryInput}
-                        type="button"
-                      >
-                        Clear
-                      </button>
-                    </div>
+                    <p className="text-sm text-gray-600">
+                      Charges run automatically when you scan, press enter, or pick a suggested item. Use the quick filters below to narrow results.
+                    </p>
+                    <button
+                      className="self-start rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-600 shadow hover:border-camp-500 sm:self-auto"
+                      disabled={state.isLoading}
+                      onClick={clearEntryInput}
+                      type="button"
+                    >
+                      Clear Input
+                    </button>
                   </div>
                 </div>
               )}
