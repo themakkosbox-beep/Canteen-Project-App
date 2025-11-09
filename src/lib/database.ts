@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import type { Database as SqlJsDatabase, SqlJsStatic, Statement } from 'sql.js';
@@ -11,19 +12,74 @@ import {
   TransactionExportRow,
   TransactionLog,
   TransactionOptionSelection,
+  AppSettingsPayload,
 } from '@/types/database';
 
 const QUICK_KEY_SETTING_KEY = 'quick_keys';
-const MAX_QUICK_KEYS = 5;
+const MAX_QUICK_KEYS = 6;
 const BACKUP_FOLDER_NAME = 'backups';
 const BACKUP_META_FILE_NAME = 'backup-metadata.json';
 const BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const BACKUP_RETENTION_COUNT = 14; // keep the last 14 backups (roughly two weeks)
 const BACKUP_RETENTION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // drop anything older than 30 days
+const APP_BRAND_NAME_KEY = 'app_brand_name';
+const APP_ADMIN_CODE_KEY = 'app_admin_code';
+const APP_GLOBAL_DISCOUNT_PERCENT_KEY = 'app_global_discount_percent';
+const APP_GLOBAL_DISCOUNT_FLAT_KEY = 'app_global_discount_flat';
+
+const hashAdminCode = (code: string): string =>
+  `sha256:${crypto.createHash('sha256').update(code).digest('hex')}`;
+
+const sanitizeBrandName = (value: string | null | undefined): string | null => {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  return trimmed.slice(0, 60);
+};
+
+const clampPercent = (value: unknown): number => {
+  if (typeof value !== 'number' && typeof value !== 'string') {
+    return 0;
+  }
+  const parsed = typeof value === 'number' ? value : Number.parseFloat(value);
+  if (!Number.isFinite(parsed)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(100, Math.round(parsed * 100) / 100));
+};
+
+const clampCurrency = (value: unknown): number => {
+  if (typeof value !== 'number' && typeof value !== 'string') {
+    return 0;
+  }
+  const parsed = typeof value === 'number' ? value : Number.parseFloat(value);
+  if (!Number.isFinite(parsed)) {
+    return 0;
+  }
+  return Math.max(0, Math.round(parsed * 100) / 100);
+};
+
+const doesAdminCodeMatch = (storedHash: string | null, candidate: string): boolean => {
+  if (!storedHash || !candidate) {
+    return false;
+  }
+  const normalized = storedHash.startsWith('sha256:') ? storedHash : hashAdminCode(storedHash);
+  const candidateHash = hashAdminCode(candidate);
+  const storedBuffer = Buffer.from(normalized, 'utf8');
+  const candidateBuffer = Buffer.from(candidateHash, 'utf8');
+  if (storedBuffer.length !== candidateBuffer.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(storedBuffer, candidateBuffer);
+};
 
 export interface BulkCustomerInput {
   customerId: string;
-  name?: string;
+  name: string;
   initialBalance?: number;
   discountPercent?: number;
   discountFlat?: number;
@@ -342,6 +398,106 @@ class DatabaseManager {
     stmt.bind([key, value ?? null]);
     stmt.step();
     stmt.free();
+  }
+
+  private readGlobalDiscount(db: SqlJsDatabase): { percent: number; flat: number } {
+    const storedPercent = this.readSetting(db, APP_GLOBAL_DISCOUNT_PERCENT_KEY);
+    const storedFlat = this.readSetting(db, APP_GLOBAL_DISCOUNT_FLAT_KEY);
+    return {
+      percent: clampPercent(storedPercent ? Number(storedPercent) : storedPercent),
+      flat: clampCurrency(storedFlat ? Number(storedFlat) : storedFlat),
+    };
+  }
+
+  public async getAppSettings(): Promise<AppSettingsPayload> {
+    return this.withDatabase((db) => {
+      const storedBrand = this.readSetting(db, APP_BRAND_NAME_KEY);
+      const normalizedBrand = sanitizeBrandName(storedBrand) ?? 'Camp Canteen POS';
+      const adminCodeHash = this.readSetting(db, APP_ADMIN_CODE_KEY);
+      const globalDiscount = this.readGlobalDiscount(db);
+      return {
+        brandName: normalizedBrand,
+        adminCodeSet: Boolean(adminCodeHash && adminCodeHash.trim().length > 0),
+        globalDiscountPercent: globalDiscount.percent,
+        globalDiscountFlat: globalDiscount.flat,
+      };
+    });
+  }
+
+  private async getAdminCodeHash(): Promise<string | null> {
+    return this.withDatabase((db) => {
+      const hash = this.readSetting(db, APP_ADMIN_CODE_KEY);
+      return hash && hash.trim().length > 0 ? hash.trim() : null;
+    });
+  }
+
+  public async verifyAdminAccessCode(candidate: string): Promise<boolean> {
+    const stored = await this.getAdminCodeHash();
+    if (!stored) {
+      return true;
+    }
+    return doesAdminCodeMatch(stored, candidate);
+  }
+
+  public async updateAppSettings(options: {
+    brandName?: string | null;
+    adminCode?: string | null;
+    clearAdminCode?: boolean;
+    globalDiscountPercent?: number | null;
+    globalDiscountFlat?: number | null;
+  }): Promise<AppSettingsPayload> {
+    const nextBrand = sanitizeBrandName(options.brandName);
+    const wantsClear = Boolean(options.clearAdminCode);
+    const nextCode = typeof options.adminCode === 'string' ? options.adminCode.trim() : null;
+    const nextPercent =
+      options.globalDiscountPercent === null
+        ? null
+        : clampPercent(options.globalDiscountPercent);
+    const nextFlat =
+      options.globalDiscountFlat === null
+        ? null
+        : clampCurrency(options.globalDiscountFlat);
+
+    return this.withDatabase((db) => {
+      if (nextBrand !== null) {
+        this.writeSetting(db, APP_BRAND_NAME_KEY, nextBrand);
+      } else if (options.brandName === '') {
+        this.writeSetting(db, APP_BRAND_NAME_KEY, null);
+      }
+
+      if (wantsClear) {
+        this.writeSetting(db, APP_ADMIN_CODE_KEY, null);
+      } else if (nextCode) {
+        this.writeSetting(db, APP_ADMIN_CODE_KEY, hashAdminCode(nextCode));
+      }
+
+      if (options.globalDiscountPercent !== undefined) {
+        this.writeSetting(
+          db,
+          APP_GLOBAL_DISCOUNT_PERCENT_KEY,
+          nextPercent === null ? null : String(nextPercent)
+        );
+      }
+
+      if (options.globalDiscountFlat !== undefined) {
+        this.writeSetting(
+          db,
+          APP_GLOBAL_DISCOUNT_FLAT_KEY,
+          nextFlat === null ? null : String(nextFlat)
+        );
+      }
+
+      const updatedBrand = sanitizeBrandName(this.readSetting(db, APP_BRAND_NAME_KEY)) ?? 'Camp Canteen POS';
+      const adminCodeHash = this.readSetting(db, APP_ADMIN_CODE_KEY);
+      const globalDiscount = this.readGlobalDiscount(db);
+
+      return {
+        brandName: updatedBrand,
+        adminCodeSet: Boolean(adminCodeHash && adminCodeHash.trim().length > 0),
+        globalDiscountPercent: globalDiscount.percent,
+        globalDiscountFlat: globalDiscount.flat,
+      };
+    }, true);
   }
 
   private persist(db: SqlJsDatabase): void {
@@ -897,7 +1053,7 @@ class DatabaseManager {
 
   public async createCustomer(
     customerId: string,
-    name?: string,
+    name: string,
     initialBalance: number = 0,
     discountPercent: number = 0,
     discountFlat: number = 0
@@ -906,10 +1062,15 @@ class DatabaseManager {
       throw new Error('Customer ID must be exactly 4 digits');
     }
 
+    if (typeof name !== 'string' || name.trim().length === 0) {
+      throw new Error('Customer name is required');
+    }
+
     if (!Number.isFinite(initialBalance) || initialBalance < 0) {
       throw new Error('Initial balance must be zero or a positive number');
     }
 
+    const normalizedName = name.trim();
     const normalizedPercent =
       Number.isFinite(discountPercent) && discountPercent > 0
         ? Math.min(100, Math.max(0, discountPercent))
@@ -935,7 +1096,7 @@ class DatabaseManager {
       `);
       insertStmt.bind([
         customerId,
-        name ?? null,
+        normalizedName,
         initialBalance,
         normalizedPercent,
         normalizedFlat,
@@ -1179,7 +1340,7 @@ class DatabaseManager {
         FROM transactions t
         LEFT JOIN products p ON t.product_id = p.product_id
         WHERE t.customer_id = ?
-        ORDER BY t.timestamp DESC
+        ORDER BY t.timestamp DESC, t.id DESC
         LIMIT ?
       `);
       stmt.bind([customerId, limit]);
@@ -1283,12 +1444,15 @@ class DatabaseManager {
         selectedOptions
       );
 
+      const globalDiscount = this.readGlobalDiscount(db);
+
       const currentBalance = this.roundCurrency(customer.balance);
       const basePrice = this.roundCurrency(product.price);
       const optionsDelta = this.roundCurrency(totalDelta);
       const optionAdjustedPrice = this.roundCurrency(basePrice + optionsDelta);
 
       let finalPrice = optionAdjustedPrice;
+      finalPrice = this.applyDiscount(finalPrice, globalDiscount.percent, globalDiscount.flat);
       finalPrice = this.applyDiscount(finalPrice, product.discount_percent, product.discount_flat);
       finalPrice = this.applyDiscount(finalPrice, customer.discount_percent, customer.discount_flat);
       finalPrice = this.roundCurrency(finalPrice);
@@ -1364,6 +1528,232 @@ class DatabaseManager {
         chargedAmount: finalPrice,
         oldBalance: currentBalance,
         newBalance,
+      };
+    }, true);
+  }
+
+  public async updateExistingPurchaseTransaction(
+    transactionId: string,
+    payload: {
+      customerId: string;
+      productId: string;
+      note?: string;
+      selectedOptions?: ProductOptionSelection[] | null;
+    }
+  ): Promise<{
+    transaction: Transaction;
+    product: Product;
+    optionSelections: TransactionOptionSelection[];
+    chargedAmount: number;
+    oldTransactionId: string;
+    voidedTransaction: Transaction;
+    balanceAfter: number;
+  }> {
+    return this.withDatabase((db) => {
+      const normalizedTransactionId = typeof transactionId === 'string' ? transactionId.trim() : '';
+      const normalizedCustomerId = typeof payload.customerId === 'string' ? payload.customerId.trim() : '';
+      const normalizedProductId = typeof payload.productId === 'string' ? payload.productId.trim() : '';
+
+      if (!normalizedTransactionId) {
+        throw new Error('Transaction ID is required');
+      }
+
+      if (!/^[0-9]{4}$/.test(normalizedCustomerId)) {
+        throw new Error('Customer ID must be exactly 4 digits');
+      }
+
+      if (!normalizedProductId) {
+        throw new Error('Product ID is required');
+      }
+
+      const transactionStmt = db.prepare('SELECT * FROM transactions WHERE transaction_id = ?');
+      transactionStmt.bind([normalizedTransactionId]);
+      const transactionRow = this.fetchOne<Transaction>(transactionStmt);
+      transactionStmt.free();
+
+      if (!transactionRow) {
+        throw new Error('Transaction not found');
+      }
+
+      const originalTransaction = this.hydrateTransaction(transactionRow);
+
+      if (originalTransaction.type !== 'purchase') {
+        throw new Error('Only purchase transactions can be edited');
+      }
+
+      if (originalTransaction.voided) {
+        throw new Error('This transaction was already voided');
+      }
+
+      if (originalTransaction.customer_id !== normalizedCustomerId) {
+        throw new Error('Transaction does not belong to the provided customer');
+      }
+
+      const customerStmt = db.prepare('SELECT * FROM customers WHERE customer_id = ?');
+      customerStmt.bind([normalizedCustomerId]);
+      const customerRow = this.fetchOne<Customer>(customerStmt);
+      customerStmt.free();
+
+      if (!customerRow) {
+        throw new Error('Customer not found');
+      }
+
+      const customer = this.hydrateCustomer(customerRow);
+
+      const productStmt = db.prepare(
+        'SELECT * FROM products WHERE product_id = ? AND active = 1'
+      );
+      productStmt.bind([normalizedProductId]);
+      const productRow = this.fetchOne<Product>(productStmt);
+      productStmt.free();
+
+      if (!productRow) {
+        throw new Error('Product not found or inactive');
+      }
+
+      const product = this.hydrateProduct(productRow);
+
+      const { selections: optionSelections, totalDelta } = this.normalizeOptionSelections(
+        product,
+        payload.selectedOptions
+      );
+
+      const globalDiscount = this.readGlobalDiscount(db);
+      const basePrice = this.roundCurrency(product.price);
+      const optionsDelta = this.roundCurrency(totalDelta);
+      const optionAdjustedPrice = this.roundCurrency(basePrice + optionsDelta);
+
+      let finalPrice = optionAdjustedPrice;
+      finalPrice = this.applyDiscount(finalPrice, globalDiscount.percent, globalDiscount.flat);
+      finalPrice = this.applyDiscount(finalPrice, product.discount_percent, product.discount_flat);
+      finalPrice = this.applyDiscount(finalPrice, customer.discount_percent, customer.discount_flat);
+      finalPrice = this.roundCurrency(finalPrice);
+
+      const originalAmount = this.roundCurrency(originalTransaction.amount);
+      if (originalAmount > 0) {
+        throw new Error('This purchase amount cannot be edited');
+      }
+
+      const originalCharge = this.roundCurrency(Math.abs(originalAmount));
+
+      const normalizedNote =
+        typeof payload.note === 'string'
+          ? payload.note.trim().length > 0
+            ? payload.note.trim()
+            : null
+          : originalTransaction.note ?? null;
+
+      const selectionJson = optionSelections.length > 0 ? JSON.stringify(optionSelections) : null;
+      const existingOptionsJson = originalTransaction.options_json ?? null;
+
+      const noOptionChange = existingOptionsJson === selectionJson;
+      const sameProduct = (originalTransaction.product_id ?? null) === product.product_id;
+      const sameCharge = Math.abs(originalCharge - finalPrice) < 0.005;
+      const sameNote = (originalTransaction.note ?? null) === normalizedNote;
+
+      if (sameProduct && noOptionChange && sameCharge && sameNote) {
+        throw new Error('No changes detected for this purchase');
+      }
+
+      const currentBalance = this.roundCurrency(customer.balance);
+      const refundedBalance = this.roundCurrency(currentBalance - originalAmount);
+
+      if (refundedBalance + 0.00001 < finalPrice) {
+        throw new Error('Insufficient balance for the updated purchase');
+      }
+
+      let newAmount = finalPrice === 0 ? 0 : this.roundCurrency(-finalPrice);
+      if (Object.is(newAmount, -0)) {
+        newAmount = 0;
+      }
+
+      let newBalance = this.roundCurrency(refundedBalance + newAmount);
+      if (newBalance < 0 && newBalance > -0.01) {
+        newBalance = 0;
+      }
+
+      if (newBalance < 0) {
+        throw new Error('Insufficient balance for the updated purchase');
+      }
+
+      const replacementTransactionId = this.generateTransactionId();
+
+      const updateCustomerStmt = db.prepare(`
+        UPDATE customers
+        SET balance = ?, updated_at = datetime('now')
+        WHERE customer_id = ?
+      `);
+      updateCustomerStmt.bind([newBalance, normalizedCustomerId]);
+      updateCustomerStmt.step();
+      updateCustomerStmt.free();
+
+      const voidNote = `Superseded by edit ${replacementTransactionId}`;
+      const voidStmt = db.prepare(`
+        UPDATE transactions
+        SET voided = 1,
+            voided_at = datetime('now'),
+            void_note = ?
+        WHERE transaction_id = ?
+      `);
+      voidStmt.bind([voidNote, normalizedTransactionId]);
+      voidStmt.step();
+      voidStmt.free();
+
+      const insertStmt = db.prepare(`
+        INSERT INTO transactions (
+          transaction_id,
+          customer_id,
+          type,
+          product_id,
+          amount,
+          balance_after,
+          note,
+          options_json
+        ) VALUES (?, ?, 'purchase', ?, ?, ?, ?, ?)
+      `);
+      insertStmt.bind([
+        replacementTransactionId,
+        normalizedCustomerId,
+        product.product_id,
+        newAmount,
+        newBalance,
+        normalizedNote,
+        selectionJson,
+      ]);
+      insertStmt.step();
+      insertStmt.free();
+
+      const selectNewStmt = db.prepare('SELECT * FROM transactions WHERE transaction_id = ?');
+      selectNewStmt.bind([replacementTransactionId]);
+      const newTransactionRow = this.fetchOne<Transaction>(selectNewStmt);
+      selectNewStmt.free();
+
+      if (!newTransactionRow) {
+        throw new Error('Failed to record updated transaction');
+      }
+
+      const newTransaction = this.hydrateTransaction(newTransactionRow);
+
+      const selectVoidedStmt = db.prepare('SELECT * FROM transactions WHERE transaction_id = ?');
+      selectVoidedStmt.bind([normalizedTransactionId]);
+      const voidedRow = this.fetchOne<Transaction>(selectVoidedStmt);
+      selectVoidedStmt.free();
+
+      const voidedTransaction = voidedRow ? this.hydrateTransaction(voidedRow) : {
+        ...originalTransaction,
+        voided: true,
+        void_note: voidNote,
+        voided_at: new Date().toISOString(),
+      };
+
+      return {
+        transaction: newTransaction,
+        product,
+        optionSelections,
+        chargedAmount: finalPrice,
+        oldTransactionId: normalizedTransactionId,
+        voidedTransaction,
+        balanceAfter: newBalance,
       };
     }, true);
   }
@@ -1488,13 +1878,23 @@ class DatabaseManager {
           p.price AS product_price,
           t.amount,
           t.balance_after,
-          t.note
+          t.note,
+          t.voided,
+          t.void_note,
+          t.options_json
         FROM transactions t
         LEFT JOIN customers c ON c.customer_id = t.customer_id
         LEFT JOIN products p ON p.product_id = t.product_id
         ORDER BY t.timestamp DESC, t.id DESC
       `);
-      return this.fetchAll<TransactionExportRow>(stmt);
+      const rows = this.fetchAll<TransactionExportRow & { voided?: number; options_json?: string | null }>(stmt);
+      return rows.map((row) => ({
+        ...row,
+        voided: Boolean(row.voided),
+        void_note: row.void_note ?? null,
+        options_json: row.options_json ?? null,
+        options: this.parseTransactionOptions(row.options_json ?? null),
+      }));
     });
   }
 

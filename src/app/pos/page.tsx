@@ -6,11 +6,11 @@ import {
   AcademicCapIcon,
   AdjustmentsHorizontalIcon,
   CheckCircleIcon,
-  SparklesIcon,
 } from '@heroicons/react/24/outline';
 import Fuse from 'fuse.js';
 import {
   Customer,
+  AppSettingsPayload,
   Product,
   ProductOptionGroup,
   ProductOptionSelection,
@@ -32,16 +32,7 @@ interface TrainingCustomerState {
   autoBalance: boolean;
 }
 
-interface BarcodeLearnModalState {
-  open: boolean;
-  barcode: string;
-  name: string;
-  price: string;
-  category: string;
-  error: string | null;
-}
-
-const QUICK_KEY_COUNT = 5;
+const QUICK_KEY_COUNT = 6;
 const MAX_TRAINING_TRANSACTIONS = 25;
 
 type PurchaseTrigger = {
@@ -60,6 +51,17 @@ interface OptionModalState {
   submitting: boolean;
 }
 
+interface EditModalState {
+  open: boolean;
+  transaction: TransactionLog | null;
+  product: Product | null;
+  productId: string;
+  selections: OptionSelectionMap;
+  note: string;
+  error: string | null;
+  submitting: boolean;
+}
+
 interface OptionEvaluationResult {
   productSelections: ProductOptionSelection[];
   transactionSelections: TransactionOptionSelection[];
@@ -67,7 +69,33 @@ interface OptionEvaluationResult {
   missingRequired: string[];
 }
 
+interface DiscountLine {
+  label: string;
+  amount: number;
+}
+
+interface PurchasePreview {
+  evaluation: OptionEvaluationResult;
+  basePrice: number;
+  optionsDelta: number;
+  subtotal: number;
+  discounts: DiscountLine[];
+  finalTotal: number;
+}
+
 const roundCurrency = (value: number): number => Math.round(value * 100) / 100;
+
+const formatPercentLabel = (value: number): string => {
+  if (!Number.isFinite(value)) {
+    return '0';
+  }
+  const absolute = Math.abs(value);
+  const rounded = Math.round(absolute * 100) / 100;
+  const formatted = Number.isInteger(rounded)
+    ? rounded.toFixed(0)
+    : rounded.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+  return formatted;
+};
 
 const createEmptyOptionModalState = (): OptionModalState => ({
   open: false,
@@ -142,6 +170,30 @@ const buildSelectionMapFromProductSelections = (
 
   return map;
 };
+
+const transactionOptionsToProductSelections = (
+  options?: TransactionOptionSelection[] | null
+): ProductOptionSelection[] => {
+  if (!Array.isArray(options) || options.length === 0) {
+    return [];
+  }
+
+  return options.map((group) => ({
+    groupId: group.groupId,
+    choiceIds: group.choices.map((choice) => choice.id),
+  }));
+};
+
+const createEmptyEditModalState = (): EditModalState => ({
+  open: false,
+  transaction: null,
+  product: null,
+  productId: '',
+  selections: {},
+  note: '',
+  error: null,
+  submitting: false,
+});
 
 const evaluateOptionSelections = (
   product: Product,
@@ -222,6 +274,74 @@ const evaluateOptionSelections = (
   };
 };
 
+const calculatePurchasePreview = (
+  product: Product | null,
+  selectionMap: OptionSelectionMap,
+  customer: Customer | null,
+  globalDiscount: { percent: number; flat: number }
+): PurchasePreview | null => {
+  if (!product) {
+    return null;
+  }
+
+  const evaluation = evaluateOptionSelections(product, selectionMap);
+  const basePrice = roundCurrency(product.price);
+  const optionsDelta = roundCurrency(evaluation.totalDelta);
+  const subtotal = roundCurrency(basePrice + optionsDelta);
+  let current = subtotal;
+  const discounts: DiscountLine[] = [];
+
+  const applyPercent = (label: string, value?: number | null) => {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+      return;
+    }
+    const bounded = Math.min(100, Math.max(0, value));
+    if (bounded <= 0) {
+      return;
+    }
+    const discount = roundCurrency(current * (bounded / 100));
+    if (discount <= 0) {
+      return;
+    }
+    current = roundCurrency(Math.max(0, current - discount));
+    discounts.push({ label: `${label} (${bounded.toFixed(2).replace(/\.00$/, '')}% off)`, amount: discount });
+  };
+
+  const applyFlat = (label: string, value?: number | null) => {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+      return;
+    }
+    const bounded = Math.max(0, value);
+    if (bounded <= 0) {
+      return;
+    }
+    const discount = roundCurrency(Math.min(current, bounded));
+    if (discount <= 0) {
+      return;
+    }
+    current = roundCurrency(Math.max(0, current - discount));
+    discounts.push({ label: `${label} (flat)`, amount: discount });
+  };
+
+  applyPercent('Global discount', globalDiscount.percent);
+  applyFlat('Global discount', globalDiscount.flat);
+  applyPercent('Product discount', product.discount_percent ?? 0);
+  applyFlat('Product discount', product.discount_flat ?? 0);
+  applyPercent('Customer discount', customer?.discount_percent ?? 0);
+  applyFlat('Customer discount', customer?.discount_flat ?? 0);
+
+  const finalTotal = roundCurrency(Math.max(0, current));
+
+  return {
+    evaluation,
+    basePrice,
+    optionsDelta,
+    subtotal,
+    discounts,
+    finalTotal,
+  };
+};
+
 const TRAINING_CUSTOMER_PRESETS: Array<{ id: string; name: string; balance: number }> = [
   { id: '9100', name: 'Training Camper Alpha', balance: 25 },
   { id: '9200', name: 'Training Camper Bravo', balance: 30 },
@@ -290,20 +410,15 @@ export default function POSPage() {
     () => buildPresetTrainingCustomers()
   );
   const [activeTrainingCustomerId, setActiveTrainingCustomerId] = useState<string | null>(null);
-  const [barcodeLearnMode, setBarcodeLearnMode] = useState(false);
-  const [learnModalState, setLearnModalState] = useState<BarcodeLearnModalState>({
-    open: false,
-    barcode: '',
-    name: '',
-    price: '',
-    category: '',
-    error: null,
-  });
-  const [creatingLearnProduct, setCreatingLearnProduct] = useState(false);
   const [currentTime, setCurrentTime] = useState(() => new Date());
   const [deletingTransactionId, setDeletingTransactionId] = useState<string | null>(null);
+  const [appSettings, setAppSettings] = useState<AppSettingsPayload | null>(null);
+  const [appSettingsError, setAppSettingsError] = useState<string | null>(null);
   const [optionModalState, setOptionModalState] = useState<OptionModalState>(() =>
     createEmptyOptionModalState()
+  );
+  const [editModalState, setEditModalState] = useState<EditModalState>(() =>
+    createEmptyEditModalState()
   );
 
   const entryInputRef = useRef<HTMLInputElement>(null);
@@ -312,6 +427,53 @@ export default function POSPage() {
     () => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }),
     []
   );
+
+  const formatCurrency = (amount: number) => currencyFormatter.format(amount);
+
+  const globalDiscount = useMemo(
+    () => ({
+      percent:
+        typeof appSettings?.globalDiscountPercent === 'number'
+          ? appSettings.globalDiscountPercent
+          : 0,
+      flat:
+        typeof appSettings?.globalDiscountFlat === 'number'
+          ? appSettings.globalDiscountFlat
+          : 0,
+    }),
+    [appSettings?.globalDiscountFlat, appSettings?.globalDiscountPercent]
+  );
+
+  const globalDiscountActive = useMemo(
+    () => globalDiscount.percent > 0 || globalDiscount.flat > 0,
+    [globalDiscount]
+  );
+
+  const globalDiscountSummary = useMemo(() => {
+    const parts: string[] = [];
+    if (globalDiscount.percent > 0) {
+      parts.push(`${formatPercentLabel(globalDiscount.percent)}% off`);
+    }
+    if (globalDiscount.flat > 0) {
+      parts.push(`${currencyFormatter.format(globalDiscount.flat)} off`);
+    }
+    return parts.join(' + ');
+  }, [currencyFormatter, globalDiscount.flat, globalDiscount.percent]);
+
+  const globalDiscountDetails = useMemo(() => {
+    const details: string[] = [];
+    if (globalDiscount.percent > 0) {
+      details.push(
+        `${formatPercentLabel(globalDiscount.percent)}% percent discount automatically applies to the subtotal.`
+      );
+    }
+    if (globalDiscount.flat > 0) {
+      details.push(
+        `${currencyFormatter.format(globalDiscount.flat)} flat discount is deducted after percentage discounts.`
+      );
+    }
+    return details;
+  }, [currencyFormatter, globalDiscount.flat, globalDiscount.percent]);
 
   const optionPreview = useMemo<OptionEvaluationResult>(() => {
     if (!optionModalState.product) {
@@ -325,21 +487,101 @@ export default function POSPage() {
     return evaluateOptionSelections(optionModalState.product, optionModalState.selections);
   }, [optionModalState.product, optionModalState.selections]);
 
+  const optionPricePreview = useMemo(() => {
+    if (!optionModalState.product) {
+      return null;
+    }
+    return calculatePurchasePreview(
+      optionModalState.product,
+      optionModalState.selections,
+      state.currentCustomer,
+      globalDiscount
+    );
+  }, [globalDiscount, optionModalState.product, optionModalState.selections, state.currentCustomer]);
+
+  const optionSubtotal = useMemo(() => {
+    if (!optionModalState.product) {
+      return 0;
+    }
+    if (optionPricePreview) {
+      return optionPricePreview.subtotal;
+    }
+    return roundCurrency(optionModalState.product.price + optionPreview.totalDelta);
+  }, [optionModalState.product, optionPricePreview, optionPreview.totalDelta]);
+
   const optionMissingGroups = useMemo(() => {
     return new Set(optionPreview.missingRequired);
   }, [optionPreview.missingRequired]);
 
   const optionEstimatedTotal = useMemo(() => {
-    if (!optionModalState.product) {
-      return 0;
-    }
-    return roundCurrency(optionModalState.product.price + optionPreview.totalDelta);
-  }, [optionModalState.product, optionPreview.totalDelta]);
+    return optionPricePreview?.finalTotal ?? 0;
+  }, [optionPricePreview]);
 
   const optionConfirmDisabled = useMemo(() => {
     const hasSelectableOptions = (optionModalState.product?.options?.length ?? 0) > 0;
     return optionModalState.submitting || (hasSelectableOptions && optionPreview.missingRequired.length > 0);
   }, [optionModalState.product, optionModalState.submitting, optionPreview.missingRequired.length]);
+
+  const editOptionPreview = useMemo<OptionEvaluationResult>(() => {
+    if (!editModalState.product) {
+      return {
+        productSelections: [],
+        transactionSelections: [],
+        totalDelta: 0,
+        missingRequired: [],
+      };
+    }
+    return evaluateOptionSelections(editModalState.product, editModalState.selections);
+  }, [editModalState.product, editModalState.selections]);
+
+  const editOptionMissingGroups = useMemo(() => {
+    return new Set(editOptionPreview.missingRequired);
+  }, [editOptionPreview.missingRequired]);
+
+  const editPricePreview = useMemo(() => {
+    if (!editModalState.product) {
+      return null;
+    }
+    return calculatePurchasePreview(
+      editModalState.product,
+      editModalState.selections,
+      state.currentCustomer,
+      globalDiscount
+    );
+  }, [editModalState.product, editModalState.selections, globalDiscount, state.currentCustomer]);
+
+  const editSubtotal = useMemo(() => {
+    if (!editModalState.product) {
+      return 0;
+    }
+    if (editPricePreview) {
+      return editPricePreview.subtotal;
+    }
+    return roundCurrency(editModalState.product.price + editOptionPreview.totalDelta);
+  }, [editModalState.product, editOptionPreview.totalDelta, editPricePreview]);
+
+  const editEstimatedTotal = useMemo(() => {
+    return editPricePreview?.finalTotal ?? 0;
+  }, [editPricePreview]);
+
+  const editConfirmDisabled = useMemo(() => {
+    const hasSelectableOptions = (editModalState.product?.options?.length ?? 0) > 0;
+    return (
+      editModalState.submitting ||
+      !editModalState.product ||
+      editModalState.productId.trim().length === 0 ||
+      (hasSelectableOptions && editOptionPreview.missingRequired.length > 0)
+    );
+  }, [
+    editModalState.product,
+    editModalState.productId,
+    editModalState.submitting,
+    editOptionPreview.missingRequired.length,
+  ]);
+
+  const sortedProducts = useMemo(() => {
+    return [...products].sort((a, b) => a.name.localeCompare(b.name));
+  }, [products]);
 
   const fuse = useMemo(() => {
     if (products.length === 0) {
@@ -378,6 +620,7 @@ export default function POSPage() {
     void loadQuickKeys();
     void loadProducts();
     void loadCategories();
+    void loadAppSettings();
   }, []);
 
   useEffect(() => {
@@ -480,6 +723,22 @@ export default function POSPage() {
     } catch (error) {
       console.error('Failed to load categories', error);
       setCategories([]);
+    }
+  };
+
+  const loadAppSettings = async () => {
+    try {
+      const response = await fetch('/api/settings/app');
+      if (!response.ok) {
+        throw new Error('Unable to load app settings');
+      }
+      const data: AppSettingsPayload = await response.json();
+      setAppSettings(data);
+      setAppSettingsError(null);
+    } catch (error) {
+      console.error('Failed to load app settings', error);
+      setAppSettings(null);
+      setAppSettingsError('Unable to load global discount settings.');
     }
   };
 
@@ -765,20 +1024,6 @@ export default function POSPage() {
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
         const message = typeof data?.error === 'string' ? data.error : 'Purchase failed';
-
-        if (barcode && barcodeLearnMode && message.toLowerCase().includes('product not found')) {
-          setLearnModalState({
-            open: true,
-            barcode,
-            name: '',
-            price: '',
-            category: '',
-            error: null,
-          });
-          setState((prev) => ({ ...prev, isLoading: false }));
-          return false;
-        }
-
         throw new Error(message);
       }
 
@@ -999,6 +1244,207 @@ export default function POSPage() {
     startProductPurchase(product, { productId: product.product_id });
   };
 
+  const openEditModal = (transaction: TransactionLog) => {
+    if (trainingMode || transaction.type !== 'purchase' || !transaction.transaction_id) {
+      return;
+    }
+
+    setState((prev) => ({ ...prev, error: null }));
+
+    const resolvedProduct = transaction.product_id
+      ? resolveProductById(transaction.product_id)
+      : null;
+
+    let selections: OptionSelectionMap = {};
+    let error: string | null = null;
+
+    if (resolvedProduct) {
+      const initialMap = createInitialSelectionMap(resolvedProduct);
+      const previousSelections = buildSelectionMapFromProductSelections(
+        resolvedProduct,
+        transactionOptionsToProductSelections(transaction.options)
+      );
+      selections = { ...initialMap, ...previousSelections };
+    } else {
+      error = 'Original product is no longer available. Select a replacement to continue.';
+    }
+
+    setEditModalState({
+      ...createEmptyEditModalState(),
+      open: true,
+      transaction,
+      product: resolvedProduct,
+      productId: resolvedProduct?.product_id ?? transaction.product_id ?? '',
+      selections,
+      note: transaction.note ?? '',
+      error,
+    });
+  };
+
+  const closeEditModal = () => {
+    setEditModalState((prev) => {
+      if (prev.submitting) {
+        return prev;
+      }
+      return createEmptyEditModalState();
+    });
+  };
+
+  const handleEditModalProductChange = (productId: string) => {
+    setEditModalState((prev) => {
+      if (prev.submitting) {
+        return prev;
+      }
+
+      const trimmed = productId.trim();
+      if (!trimmed) {
+        return {
+          ...prev,
+          productId: '',
+          product: null,
+          selections: {},
+          error: 'Select a product to continue.',
+        };
+      }
+
+      const product = resolveProductById(trimmed);
+      if (!product) {
+        return {
+          ...prev,
+          productId: trimmed,
+          product: null,
+          selections: {},
+          error: 'Selected product is unavailable.',
+        };
+      }
+
+      const nextSelections =
+        prev.product && prev.product.product_id === product.product_id
+          ? { ...prev.selections }
+          : createInitialSelectionMap(product);
+
+      return {
+        ...prev,
+        productId: trimmed,
+        product,
+        selections: nextSelections,
+        error: null,
+      };
+    });
+  };
+
+  const toggleEditOptionChoice = (group: ProductOptionGroup, choiceId: string) => {
+    setEditModalState((prev) => {
+      if (!prev.product || prev.submitting || typeof group.id !== 'string') {
+        return prev;
+      }
+
+      const trimmed = typeof choiceId === 'string' ? choiceId.trim() : '';
+      if (!trimmed) {
+        return prev;
+      }
+
+      const current = Array.isArray(prev.selections[group.id]) ? prev.selections[group.id] : [];
+      let next: string[];
+
+      if (group.multiple) {
+        next = current.includes(trimmed)
+          ? current.filter((id) => id !== trimmed)
+          : [...current, trimmed];
+      } else {
+        next = current.includes(trimmed) ? [] : [trimmed];
+      }
+
+      return {
+        ...prev,
+        error: null,
+        selections: {
+          ...prev.selections,
+          [group.id]: next,
+        },
+      };
+    });
+  };
+
+  const handleEditModalSubmit = async () => {
+    if (!editModalState.open || !editModalState.transaction || trainingMode) {
+      return;
+    }
+
+    const transactionId = editModalState.transaction.transaction_id;
+    if (!transactionId) {
+      setEditModalState((prev) => ({ ...prev, error: 'Unable to edit this transaction.' }));
+      return;
+    }
+
+    const customerId = editModalState.transaction.customer_id;
+    const trimmedProductId = editModalState.productId.trim();
+
+    if (!trimmedProductId) {
+      setEditModalState((prev) => ({ ...prev, error: 'Select a product to continue.' }));
+      return;
+    }
+
+    const product = editModalState.product ?? resolveProductById(trimmedProductId);
+    if (!product) {
+      setEditModalState((prev) => ({ ...prev, error: 'Selected product is unavailable.' }));
+      return;
+    }
+
+    const preview =
+      editPricePreview ??
+      calculatePurchasePreview(product, editModalState.selections, state.currentCustomer, globalDiscount);
+
+    if (!preview) {
+      setEditModalState((prev) => ({ ...prev, error: 'Unable to calculate updated price.' }));
+      return;
+    }
+
+    const evaluation = preview.evaluation;
+    const hasOptions = (product.options?.length ?? 0) > 0;
+
+    if (hasOptions && evaluation.missingRequired.length > 0) {
+      const uniqueGroups = Array.from(new Set(evaluation.missingRequired));
+      const message =
+        uniqueGroups.length === 1
+          ? `Select an option for ${uniqueGroups[0]}.`
+          : `Select options for ${uniqueGroups.join(', ')}.`;
+      setEditModalState((prev) => ({ ...prev, error: message }));
+      return;
+    }
+
+    setState((prev) => ({ ...prev, isLoading: true, error: null }));
+    setEditModalState((prev) => ({ ...prev, submitting: true, error: null }));
+
+    try {
+      const response = await fetch(`/api/transactions/${encodeURIComponent(transactionId)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          customerId,
+          productId: product.product_id,
+          note: editModalState.note,
+          selectedOptions: evaluation.productSelections,
+        }),
+      });
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(
+          typeof data?.error === 'string' ? data.error : 'Failed to update transaction'
+        );
+      }
+
+      await loadCustomer(customerId);
+      setEditModalState(createEmptyEditModalState());
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Failed to update transaction';
+      setState((prev) => ({ ...prev, isLoading: false, error: message }));
+      setEditModalState((prev) => ({ ...prev, submitting: false, error: message }));
+    }
+  };
+
   const handlePrimaryCharge = () => {
     if (!state.currentCustomer || state.isLoading) {
       return;
@@ -1072,77 +1518,6 @@ export default function POSPage() {
     }
   };
 
-  const closeLearnModal = () => {
-    if (creatingLearnProduct) {
-      return;
-    }
-    setLearnModalState({ open: false, barcode: '', name: '', price: '', category: '', error: null });
-  };
-
-  const handleLearnModalSubmit = async () => {
-    if (!learnModalState.open) {
-      return;
-    }
-
-    const trimmedName = learnModalState.name.trim();
-    if (!trimmedName.length) {
-      setLearnModalState((prev) => ({ ...prev, error: 'Product name is required' }));
-      return;
-    }
-
-    const parsedPrice = Number.parseFloat(learnModalState.price);
-    if (!Number.isFinite(parsedPrice) || parsedPrice <= 0) {
-      setLearnModalState((prev) => ({ ...prev, error: 'Price must be a positive number' }));
-      return;
-    }
-
-    setCreatingLearnProduct(true);
-    try {
-      const response = await fetch('/api/products', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: trimmedName,
-          price: parsedPrice,
-          barcode: learnModalState.barcode,
-          category: learnModalState.category.trim() || undefined,
-          active: true,
-        }),
-      });
-
-      if (!response.ok) {
-        const data = await response.json().catch(() => ({}));
-        throw new Error(
-          typeof data?.error === 'string' ? data.error : 'Failed to create product from barcode'
-        );
-      }
-
-      const product: Product = await response.json();
-      setProducts((prev) => {
-        const filtered = prev.filter((item) => item.product_id !== product.product_id);
-        return [product, ...filtered];
-      });
-      await loadProducts();
-      await loadQuickKeys();
-      setLearnModalState({ open: false, barcode: '', name: '', price: '', category: '', error: null });
-      setEntryInput(product.name);
-      setShowProductDropdown(false);
-
-      if (state.currentCustomer) {
-        await handlePurchase({ productId: product.product_id });
-      }
-    } catch (error) {
-      setLearnModalState((prev) => ({
-        ...prev,
-        error: error instanceof Error ? error.message : 'Failed to create product',
-      }));
-    } finally {
-      setCreatingLearnProduct(false);
-    }
-  };
-
-  const formatCurrency = (amount: number) => currencyFormatter.format(amount);
-
   const formatTime = (timestamp: string) =>
     new Date(timestamp).toLocaleTimeString('en-US', {
       hour: '2-digit',
@@ -1167,6 +1542,7 @@ export default function POSPage() {
       [
         'Transaction ID',
         'Type',
+        'Voided',
         'Amount',
         'Balance After',
         'Timestamp',
@@ -1178,6 +1554,7 @@ export default function POSPage() {
       ...state.recentTransactions.map((transaction) => [
         transaction.transaction_id ?? '',
         transaction.type,
+        transaction.voided ? 'Yes' : 'No',
         formatCurrency(transaction.amount),
         formatCurrency(transaction.balance_after),
         new Date(transaction.timestamp).toLocaleString(),
@@ -1298,19 +1675,40 @@ export default function POSPage() {
               {trainingMode ? <CheckCircleIcon className="h-4 w-4" /> : <AcademicCapIcon className="h-4 w-4" />}
               Training Mode
             </button>
-            <button
-              className={toggleClass(barcodeLearnMode)}
-              onClick={() => setBarcodeLearnMode((prev) => !prev)}
-              type="button"
-            >
-              {barcodeLearnMode ? <CheckCircleIcon className="h-4 w-4" /> : <SparklesIcon className="h-4 w-4" />}
-              Barcode Learn
-            </button>
           </div>
         </div>
       </header>
-
       <main className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-6 px-6 py-6">
+        {appSettingsError ? (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+            {appSettingsError}
+          </div>
+        ) : null}
+
+        {globalDiscountActive ? (
+          <section className="rounded-lg border border-camp-200 bg-camp-50 px-4 py-3 text-sm text-camp-800">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <span className="font-semibold text-camp-900">
+                Global discount currently applies to all purchases.
+              </span>
+              {globalDiscountSummary ? (
+                <span className="inline-flex items-center rounded-full bg-white px-3 py-1 text-xs font-semibold text-camp-700 shadow-sm">
+                  {globalDiscountSummary}
+                </span>
+              ) : null}
+            </div>
+            {globalDiscountDetails.length ? (
+              <ul className="mt-2 list-disc space-y-1 pl-5">
+                {globalDiscountDetails.map((detail) => (
+                  <li key={detail} className="text-xs text-camp-700">
+                    {detail}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+          </section>
+        ) : null}
+
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1.4fr_1fr]">
           <div className="space-y-6">
             <section className="rounded-xl border border-gray-200 bg-white p-6 shadow">
@@ -1396,11 +1794,7 @@ export default function POSPage() {
                             handlePrimaryCharge();
                           }
                         }}
-                        placeholder={
-                          barcodeLearnMode
-                            ? 'Scan to learn or begin typing to search'
-                            : 'Scan barcode or search by name/ID'
-                        }
+                        placeholder="Scan barcode or search by name/ID"
                         ref={entryInputRef}
                         value={entryInput}
                       />
@@ -1443,11 +1837,6 @@ export default function POSPage() {
                   <p className="text-sm text-gray-500">
                     Press Enter to charge a scanned barcode immediately, or pick from the suggestions below.
                   </p>
-                  {barcodeLearnMode ? (
-                    <p className="text-sm text-camp-600">
-                      Unknown barcodes can be converted into products in one step.
-                    </p>
-                  ) : null}
                 </div>
               </div>
 
@@ -1457,8 +1846,8 @@ export default function POSPage() {
                 </div>
               ) : (
                 <div className="mt-6 space-y-4">
-                  <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
-                    <span>Quick filters:</span>
+                  <div className="flex flex-wrap items-center gap-2 text-xs font-medium text-gray-600">
+                    <span>Quick Filters</span>
                     {categories.length === 0 ? (
                       <span className="text-gray-400">No categories yet.</span>
                     ) : null}
@@ -1477,9 +1866,9 @@ export default function POSPage() {
                       </button>
                     ))}
                   </div>
-                  <div className="flex flex-col gap-3 rounded-lg border border-gray-200 bg-gray-50 p-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex flex-col gap-2 rounded-lg border border-gray-200 bg-gray-50 p-3 sm:flex-row sm:items-center sm:justify-between">
                     <p className="text-sm text-gray-600">
-                      Charges run automatically when you scan, press enter, or pick a suggested item. Use the quick filters below to narrow results.
+                      Scanning, pressing Enter, or selecting a suggestion will complete the charge immediately. Use Quick Filters to narrow the list before choosing.
                     </p>
                     <button
                       className="self-start rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-600 shadow hover:border-camp-500 sm:self-auto"
@@ -1750,7 +2139,13 @@ export default function POSPage() {
               </div>
               {trainingMode ? (
                 <p className="mt-2 text-xs text-gray-500">
-                  Editing is disabled in training mode. Switch back to live mode to void transactions.
+                  Editing and voiding are disabled in training mode. Switch back to live mode to manage transactions.
+                </p>
+              ) : null}
+
+              {!trainingMode && globalDiscountActive ? (
+                <p className="mt-2 text-xs font-semibold text-camp-700">
+                  Global discount is active—recent totals already include the automatic adjustment.
                 </p>
               ) : null}
 
@@ -1758,9 +2153,20 @@ export default function POSPage() {
                 <div className="mt-4 space-y-3">
                   {filteredTransactions.map((transaction) => {
                     const amountPositive = transaction.amount >= 0;
-                    const canDelete = !trainingMode && Boolean(transaction.transaction_id);
+                    const canDelete =
+                      !trainingMode &&
+                      Boolean(transaction.transaction_id) &&
+                      !transaction.voided;
+                    const canEdit =
+                      !trainingMode &&
+                      transaction.type === 'purchase' &&
+                      Boolean(transaction.transaction_id) &&
+                      !transaction.voided;
                     const isDeleting =
                       canDelete && deletingTransactionId === transaction.transaction_id;
+                    const amountClass = transaction.voided
+                      ? 'text-sm font-semibold text-gray-400 line-through'
+                      : `text-sm font-semibold ${amountPositive ? 'text-camp-600' : 'text-red-600'}`;
 
                     return (
                       <div
@@ -1796,15 +2202,26 @@ export default function POSPage() {
                             ) : null}
                           </div>
                           <div className="flex flex-col items-end gap-2 text-right sm:flex-row sm:items-center sm:gap-3">
-                            <span
-                              className={`text-sm font-semibold ${
-                                amountPositive ? 'text-camp-600' : 'text-red-600'
-                              }`}
-                            >
+                            <span className={amountClass}>
                               {amountPositive
                                 ? `+${formatCurrency(transaction.amount)}`
                                 : `-${formatCurrency(Math.abs(transaction.amount))}`}
                             </span>
+                            {transaction.voided ? (
+                              <span className="rounded-full bg-red-100 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-red-700">
+                                Voided
+                              </span>
+                            ) : null}
+                            {canEdit ? (
+                              <button
+                                className="rounded-full border border-gray-300 px-3 py-1 text-xs font-semibold text-gray-600 shadow-sm hover:border-camp-500 hover:text-camp-700"
+                                disabled={state.isLoading}
+                                onClick={() => openEditModal(transaction)}
+                                type="button"
+                              >
+                                Edit
+                              </button>
+                            ) : null}
                             {canDelete ? (
                               <button
                                 className="rounded-full border border-gray-300 px-3 py-1 text-xs font-semibold text-gray-600 shadow-sm hover:border-red-400 hover:text-red-600"
@@ -1952,7 +2369,12 @@ export default function POSPage() {
                   </div>
                 ) : null}
 
-                <div className="mt-6 rounded-lg bg-gray-50 px-4 py-3 text-sm">
+                {globalDiscountActive ? (
+                  <p className="mt-6 text-xs font-semibold text-camp-700">
+                    Global discount applies automatically to this charge.
+                  </p>
+                ) : null}
+                <div className={`rounded-lg bg-gray-50 px-4 py-3 text-sm ${globalDiscountActive ? 'mt-3' : 'mt-6'}`}>
                   <div className="flex items-center justify-between">
                     <span>Base Price</span>
                     <span>{formatCurrency(optionModalState.product.price)}</span>
@@ -1960,11 +2382,35 @@ export default function POSPage() {
                   <div className="mt-1 flex items-center justify-between">
                     <span>Options</span>
                     <span className={optionPreview.totalDelta >= 0 ? 'text-camp-600' : 'text-red-600'}>
-                      {optionPreview.totalDelta >= 0 ? '+' : '-'}
-                      {formatCurrency(Math.abs(optionPreview.totalDelta))}
+                      {optionPreview.totalDelta === 0
+                        ? formatCurrency(0)
+                        : `${optionPreview.totalDelta > 0 ? '+' : '-'}${formatCurrency(
+                            Math.abs(optionPreview.totalDelta)
+                          )}`}
                     </span>
                   </div>
-                  <div className="mt-2 flex items-center justify-between border-t border-gray-200 pt-2 text-sm font-semibold text-gray-800">
+                  <div className="mt-1 flex items-center justify-between text-gray-700">
+                    <span>Subtotal</span>
+                    <span>{formatCurrency(optionSubtotal)}</span>
+                  </div>
+                  {optionPricePreview?.discounts.length ? (
+                    <div className="mt-2 space-y-1 border-t border-gray-200 pt-2">
+                      {optionPricePreview.discounts.map((discount) => (
+                        <div
+                          key={discount.label}
+                          className="flex items-center justify-between text-xs text-camp-700"
+                        >
+                          <span>{discount.label}</span>
+                          <span>-{formatCurrency(discount.amount)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                  <div
+                    className={`mt-2 flex items-center justify-between text-sm font-semibold text-gray-900 ${
+                      optionPricePreview?.discounts.length ? '' : 'border-t border-gray-200 pt-2'
+                    }`}
+                  >
                     <span>Estimated Total</span>
                     <span>{formatCurrency(optionEstimatedTotal)}</span>
                   </div>
@@ -1996,87 +2442,216 @@ export default function POSPage() {
         </div>
       </Dialog>
 
-      <Dialog open={learnModalState.open} onClose={closeLearnModal}>
+      <Dialog open={editModalState.open} onClose={closeEditModal}>
         <div className="fixed inset-0 bg-black/40" aria-hidden="true" />
         <div className="fixed inset-0 flex items-center justify-center p-4">
-          <Dialog.Panel className="w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
-            <Dialog.Title className="text-lg font-semibold text-gray-900">
-              Create Product from Barcode
-            </Dialog.Title>
-            <Dialog.Description className="mt-1 text-sm text-gray-500">
-              We couldn&apos;t find a product with barcode {learnModalState.barcode}. Fill out the details to add it now.
-            </Dialog.Description>
+          <Dialog.Panel className="w-full max-w-2xl rounded-xl bg-white p-6 shadow-xl">
+            {editModalState.transaction ? (
+              <>
+                <Dialog.Title className="text-lg font-semibold text-gray-900">
+                  Update Purchase
+                </Dialog.Title>
+                <Dialog.Description className="mt-1 text-sm text-gray-500">
+                  Adjust the product, options, or note. The original purchase will be voided automatically.
+                </Dialog.Description>
 
-            <div className="mt-4 space-y-3">
-              <div>
-                <label className="text-sm font-medium text-gray-700" htmlFor="learn-name">
-                  Product Name
-                </label>
-                <input
-                  className="mt-1 w-full rounded-lg border border-gray-300 px-4 py-2 text-sm shadow-sm focus:border-camp-500 focus:outline-none focus:ring-2 focus:ring-camp-200"
-                  id="learn-name"
-                  onChange={(event) =>
-                    setLearnModalState((prev) => ({ ...prev, name: event.target.value }))
-                  }
-                  value={learnModalState.name}
-                />
-              </div>
+                <div className="mt-4 space-y-5">
+                  <div>
+                    <label className="text-sm font-medium text-gray-700" htmlFor="edit-product">
+                      Product
+                    </label>
+                    <select
+                      className="mt-1 w-full rounded-lg border border-gray-300 px-4 py-2 text-sm shadow-sm focus:border-camp-500 focus:outline-none focus:ring-2 focus:ring-camp-200"
+                      disabled={editModalState.submitting}
+                      id="edit-product"
+                      onChange={(event) => handleEditModalProductChange(event.target.value)}
+                      value={editModalState.productId}
+                    >
+                      <option value="">Select a product</option>
+                      {!sortedProducts.some((product) => product.product_id === editModalState.productId) &&
+                      editModalState.productId ? (
+                        <option value={editModalState.productId}>
+                          {editModalState.transaction.product_name ?? editModalState.productId} (inactive)
+                        </option>
+                      ) : null}
+                      {sortedProducts.map((product) => (
+                        <option key={product.product_id} value={product.product_id}>
+                          {product.name} ({formatCurrency(product.price)})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
 
-              <div>
-                <label className="text-sm font-medium text-gray-700" htmlFor="learn-price">
-                  Price
-                </label>
-                <input
-                  className="mt-1 w-full rounded-lg border border-gray-300 px-4 py-2 text-sm shadow-sm focus:border-camp-500 focus:outline-none focus:ring-2 focus:ring-camp-200"
-                  id="learn-price"
-                  onChange={(event) =>
-                    setLearnModalState((prev) => ({ ...prev, price: event.target.value }))
-                  }
-                  type="number"
-                  value={learnModalState.price}
-                />
-              </div>
+                  {editModalState.product?.options?.length ? (
+                    <div className="space-y-4">
+                      {editModalState.product.options.map((group) => {
+                        const groupId = group.id;
+                        const selectedIds = Array.isArray(editModalState.selections[groupId])
+                          ? editModalState.selections[groupId]
+                          : [];
+                        const missing = editOptionMissingGroups.has(group.name);
 
-              <div>
-                <label className="text-sm font-medium text-gray-700" htmlFor="learn-category">
-                  Category
-                </label>
-                <input
-                  className="mt-1 w-full rounded-lg border border-gray-300 px-4 py-2 text-sm shadow-sm focus:border-camp-500 focus:outline-none focus:ring-2 focus:ring-camp-200"
-                  id="learn-category"
-                  onChange={(event) =>
-                    setLearnModalState((prev) => ({ ...prev, category: event.target.value }))
-                  }
-                  placeholder="Optional"
-                  value={learnModalState.category}
-                />
-              </div>
+                        return (
+                          <div key={groupId} className="rounded-lg border border-gray-200 p-4">
+                            <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                              <p className="text-sm font-semibold text-gray-800">{group.name}</p>
+                              <div className="flex items-center gap-2 text-xs">
+                                {group.required ? (
+                                  <span
+                                    className={
+                                      missing
+                                        ? 'font-semibold text-red-600'
+                                        : 'font-semibold text-camp-600'
+                                    }
+                                  >
+                                    Required
+                                  </span>
+                                ) : (
+                                  <span className="text-gray-400">Optional</span>
+                                )}
+                                {group.multiple ? (
+                                  <span className="rounded-full bg-gray-100 px-2 py-0.5 text-gray-600">
+                                    Multiple
+                                  </span>
+                                ) : null}
+                              </div>
+                            </div>
+                            <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                              {group.choices.map((choice) => {
+                                const delta =
+                                  typeof choice.priceDelta === 'number' && Number.isFinite(choice.priceDelta)
+                                    ? choice.priceDelta
+                                    : 0;
+                                const isSelected = selectedIds.includes(choice.id);
+                                return (
+                                  <button
+                                    key={choice.id}
+                                    className={`flex flex-col items-start rounded-lg border px-3 py-2 text-left text-sm transition ${
+                                      isSelected
+                                        ? 'border-camp-500 bg-camp-50 text-camp-700 shadow'
+                                        : 'border-gray-200 bg-white text-gray-700 hover:border-camp-400'
+                                    }`}
+                                    disabled={editModalState.submitting}
+                                    onClick={() => toggleEditOptionChoice(group, choice.id)}
+                                    type="button"
+                                  >
+                                    <span className="font-medium">{choice.label}</span>
+                                    <span className="text-xs text-gray-500">
+                                      {delta === 0
+                                        ? 'No change'
+                                        : delta > 0
+                                        ? `+${formatCurrency(delta)}`
+                                        : `-${formatCurrency(Math.abs(delta))}`}
+                                    </span>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : null}
 
-              {learnModalState.error ? (
-                <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-                  {learnModalState.error}
+                  <div>
+                    <label className="text-sm font-medium text-gray-700" htmlFor="edit-note">
+                      Note (optional)
+                    </label>
+                    <textarea
+                      className="mt-2 w-full rounded-lg border border-gray-300 px-4 py-2 text-sm shadow-sm focus:border-camp-500 focus:outline-none focus:ring-2 focus:ring-camp-200"
+                      disabled={editModalState.submitting}
+                      id="edit-note"
+                      onChange={(event) =>
+                        setEditModalState((prev) => ({ ...prev, note: event.target.value }))
+                      }
+                      placeholder="Add context for this purchase"
+                      rows={3}
+                      value={editModalState.note}
+                    />
+                  </div>
                 </div>
-              ) : null}
-            </div>
 
-            <div className="mt-6 flex items-center justify-end gap-3">
-              <button
-                className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-600 shadow hover:border-camp-500"
-                disabled={creatingLearnProduct}
-                onClick={closeLearnModal}
-                type="button"
-              >
-                Cancel
-              </button>
-              <button
-                className="rounded-lg bg-camp-600 px-4 py-2 text-sm font-semibold text-white shadow hover:bg-camp-700"
-                disabled={creatingLearnProduct}
-                onClick={() => void handleLearnModalSubmit()}
-                type="button"
-              >
-                Save Product & Charge
-              </button>
-            </div>
+                {editModalState.error ? (
+                  <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                    {editModalState.error}
+                  </div>
+                ) : null}
+
+                {editModalState.product ? (
+                  <>
+                    {globalDiscountActive ? (
+                      <p className="mt-6 text-xs font-semibold text-camp-700">
+                        Global discount applies automatically when this update saves.
+                      </p>
+                    ) : null}
+                    <div
+                      className={`rounded-lg bg-gray-50 px-4 py-3 text-sm ${
+                        globalDiscountActive ? 'mt-3' : 'mt-6'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span>Base Price</span>
+                        <span>{formatCurrency(editModalState.product.price)}</span>
+                      </div>
+                      <div className="mt-1 flex items-center justify-between">
+                        <span>Options</span>
+                        <span className={editOptionPreview.totalDelta >= 0 ? 'text-camp-600' : 'text-red-600'}>
+                          {editOptionPreview.totalDelta === 0
+                            ? formatCurrency(0)
+                            : `${editOptionPreview.totalDelta > 0 ? '+' : '-'}${formatCurrency(
+                                Math.abs(editOptionPreview.totalDelta)
+                              )}`}
+                        </span>
+                      </div>
+                      <div className="mt-1 flex items-center justify-between text-gray-700">
+                        <span>Subtotal</span>
+                        <span>{formatCurrency(editSubtotal)}</span>
+                      </div>
+                      {editPricePreview?.discounts.length ? (
+                        <div className="mt-2 space-y-1 border-t border-gray-200 pt-2">
+                          {editPricePreview.discounts.map((discount) => (
+                            <div
+                              key={discount.label}
+                              className="flex items-center justify-between text-xs text-camp-700"
+                            >
+                              <span>{discount.label}</span>
+                              <span>-{formatCurrency(discount.amount)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
+                      <div
+                        className={`mt-2 flex items-center justify-between text-sm font-semibold text-gray-900 ${
+                          editPricePreview?.discounts.length ? '' : 'border-t border-gray-200 pt-2'
+                        }`}
+                      >
+                        <span>Estimated Total</span>
+                        <span>{formatCurrency(editEstimatedTotal)}</span>
+                      </div>
+                    </div>
+                  </>
+                ) : null}
+
+                <div className="mt-6 flex items-center justify-end gap-3">
+                  <button
+                    className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-600 shadow hover:border-camp-500"
+                    disabled={editModalState.submitting}
+                    onClick={closeEditModal}
+                    type="button"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="rounded-lg bg-camp-600 px-4 py-2 text-sm font-semibold text-white shadow hover:bg-camp-700 disabled:opacity-70"
+                    disabled={editConfirmDisabled}
+                    onClick={() => void handleEditModalSubmit()}
+                    type="button"
+                  >
+                    {editModalState.submitting ? 'Saving…' : 'Save Changes'}
+                  </button>
+                </div>
+              </>
+            ) : null}
           </Dialog.Panel>
         </div>
       </Dialog>

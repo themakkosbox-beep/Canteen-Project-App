@@ -1,18 +1,21 @@
 import '../styles/globals.css'
 import type { Metadata } from 'next'
 import Navigation from '@/components/Navigation'
+import DatabaseManager from '@/lib/database'
 
 export const metadata: Metadata = {
   title: 'Camp Canteen POS',
   description: 'Point of Sale system for camp canteen with prepaid accounts',
 }
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: {
   children: React.ReactNode
 }) {
   const appVersion = process.env.NEXT_PUBLIC_APP_VERSION ?? '0.0.0';
+  const database = DatabaseManager.getInstance();
+  const appSettings = await database.getAppSettings();
 
   return (
     <html lang="en">
@@ -20,7 +23,7 @@ export default function RootLayout({
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
       </head>
       <body className="bg-gray-50 min-h-screen">
-        <Navigation />
+        <Navigation brandName={appSettings.brandName} />
         <main className="pt-6">
           {children}
         </main>

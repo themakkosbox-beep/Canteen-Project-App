@@ -75,6 +75,10 @@ export interface TransactionExportRow {
   amount: number;
   balance_after: number;
   note?: string;
+  voided?: boolean;
+  void_note?: string | null;
+  options_json?: string | null;
+  options?: TransactionOptionSelection[];
 }
 
 export interface Transaction {
@@ -100,3 +104,10 @@ export interface TransactionLog extends Transaction {
 }
 
 export type TransactionType = Transaction['type'];
+
+export interface AppSettingsPayload {
+  brandName: string;
+  adminCodeSet: boolean;
+  globalDiscountPercent: number;
+  globalDiscountFlat: number;
+}

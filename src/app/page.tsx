@@ -1,3 +1,5 @@
+import Image from 'next/image';
+
 const FEATURE_LIST = [
   'Prepaid customer accounts with 4-digit IDs',
   'Barcode scanning for instant purchases',
@@ -44,10 +46,13 @@ export default function HomePage() {
   return (
     <div className="container mx-auto px-4 py-10">
       <div className="mx-auto flex max-w-5xl flex-col items-center gap-6 rounded-2xl bg-white p-8 shadow-lg">
-        <img
+        <Image
           alt="Camp Canteen POS logo"
           className="h-20 w-20"
+          height={80}
+          priority
           src="/logo-canteen.svg"
+          width={80}
         />
         <div className="text-center space-y-2">
           <h1 className="text-3xl font-bold text-camp-700">Camp Canteen POS</h1>

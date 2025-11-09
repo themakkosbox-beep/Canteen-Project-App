@@ -44,7 +44,12 @@ export async function POST(request: Request) {
       }
 
       const nameRaw = Reflect.get(entry, "name");
-      const name = typeof nameRaw === "string" && nameRaw.trim().length > 0 ? nameRaw.trim() : undefined;
+      if (typeof nameRaw !== "string" || nameRaw.trim().length === 0) {
+        invalidEntries.push({ input: entry, error: "name is required." });
+        continue;
+      }
+
+      const name = nameRaw.trim();
 
       const balanceRaw = Reflect.get(entry, "initialBalance");
       let initialBalance: number | undefined;
@@ -57,7 +62,7 @@ export async function POST(request: Request) {
         initialBalance = parsed;
       }
 
-      validEntries.push({ customerId, name, initialBalance });
+  validEntries.push({ customerId, name, initialBalance });
     }
 
     if (validEntries.length === 0) {

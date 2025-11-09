@@ -41,7 +41,7 @@ interface ProductOptionGroupState {
   choices: ProductOptionChoiceState[];
 }
 
-const QUICK_KEY_COUNT = 5;
+const QUICK_KEY_COUNT = 6;
 
 const createEmptyQuickKeySlots = (): QuickKeySlot[] =>
   Array.from({ length: QUICK_KEY_COUNT }, (_, index) => ({
@@ -501,7 +501,10 @@ export default function AdminPage() {
     }
 
     const trimmedName = customerForm.name.trim();
-    const normalizedName = trimmedName.length > 0 ? trimmedName : null;
+    if (trimmedName.length === 0) {
+      setError('Customer name is required');
+      return;
+    }
 
     const parsedBalance = customerForm.initialBalance.trim().length
       ? Number.parseFloat(customerForm.initialBalance)
@@ -517,7 +520,7 @@ export default function AdminPage() {
         const response = await fetch(`/api/customers/${editingCustomerId}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: normalizedName }),
+          body: JSON.stringify({ name: trimmedName }),
         });
 
         if (!response.ok) {
@@ -532,7 +535,7 @@ export default function AdminPage() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             customerId: trimmedId,
-            name: normalizedName,
+            name: trimmedName,
             initialBalance: parsedBalance,
           }),
         });
@@ -1177,7 +1180,6 @@ export default function AdminPage() {
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700">Name</label>
-              <p className="text-xs text-gray-500 mt-1">Optional—leave blank if the camper prefers to stay anonymous.</p>
               <input
                 type="text"
                 value={customerForm.name}
@@ -1185,7 +1187,8 @@ export default function AdminPage() {
                   setCustomerForm((prev) => ({ ...prev, name: event.target.value }))
                 }
                 className="pos-input w-full mt-2"
-                placeholder="Camper name (optional)"
+                placeholder="Camper name"
+                required
               />
             </div>
             <div>
@@ -1295,7 +1298,7 @@ export default function AdminPage() {
               <div>
                 <h3 className="text-lg font-semibold">Bulk Import Customers</h3>
                 <p className="text-sm text-gray-600">
-                  Paste one customer per line using <code className="font-mono bg-gray-100 px-1 py-0.5 rounded">1234, Name, InitialBalance</code>.
+                  Paste one customer per line using <code className="font-mono bg-gray-100 px-1 py-0.5 rounded">1234, Name, InitialBalance</code>. Name is required; leave the balance blank for zero.
                 </p>
               </div>
               <button
@@ -1309,7 +1312,7 @@ export default function AdminPage() {
             {showCustomerImport ? (
               <form onSubmit={handleBulkCustomerSubmit} className="mt-4 space-y-3">
                 <p className="text-xs text-gray-500">
-                  Initial balance is optional—leave blank for zero.
+                  Initial balance remains optional.
                 </p>
                 <textarea
                   value={bulkCustomerInput}
@@ -1335,11 +1338,7 @@ export default function AdminPage() {
                   </button>
                 </div>
               </form>
-            ) : (
-              <p className="mt-4 text-sm text-gray-500">
-                Keep imports tucked away until you need them—use the toggle to paste rows.
-              </p>
-            )}
+            ) : null}
           </div>
         </section>
 
@@ -1724,7 +1723,7 @@ export default function AdminPage() {
               <div>
                 <h3 className="text-lg font-semibold">Bulk Import Products</h3>
                 <p className="text-sm text-gray-600">
-                  Format: <code className="font-mono bg-gray-100 px-1 py-0.5 rounded">Name, Price, ProductID, Barcode, Category, Active</code>.
+                  Format: <code className="font-mono bg-gray-100 px-1 py-0.5 rounded">Name, Price, ProductID, Barcode, Category, Active</code>. Only name and price are required.
                 </p>
               </div>
               <button
@@ -1764,11 +1763,7 @@ export default function AdminPage() {
                   </button>
                 </div>
               </form>
-            ) : (
-              <p className="mt-4 text-sm text-gray-500">
-                Ready to paste a spreadsheet? Use the toggle when you are.
-              </p>
-            )}
+            ) : null}
           </div>
         </section>
 
@@ -1777,7 +1772,7 @@ export default function AdminPage() {
             <div>
               <h2 className="text-xl font-semibold">POS Quick Keys</h2>
               <p className="text-sm text-gray-600">
-                Assign up to five fast-access buttons so the register can ring top sellers in one tap.
+                Assign up to six fast-access buttons so the register can ring top sellers in one tap.
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -1802,7 +1797,7 @@ export default function AdminPage() {
           {loadingQuickKeys ? (
             <p className="text-gray-500">Loading quick key slots…</p>
           ) : (
-            <div className="grid gap-4 md:grid-cols-5">
+            <div className="grid gap-4 md:grid-cols-3 xl:grid-cols-6">
               {quickKeySlots.map((slot) => (
                 <div key={slot.index} className="rounded-lg border border-gray-200 p-4 space-y-3">
                   <div className="flex items-center justify-between">

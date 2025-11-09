@@ -33,7 +33,14 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const normalizedName = typeof name === 'string' ? name.trim() : undefined;
+      if (typeof name !== 'string' || name.trim().length === 0) {
+        return NextResponse.json(
+          { error: 'Customer name is required' },
+          { status: 400 }
+        );
+      }
+
+      const normalizedName = name.trim();
     const balanceValue =
       initialBalance === undefined || initialBalance === null
         ? 0
@@ -49,7 +56,7 @@ export async function POST(request: NextRequest) {
     const database = DatabaseManager.getInstance();
     const customer = await database.createCustomer(
       customerId,
-      normalizedName && normalizedName.length > 0 ? normalizedName : undefined,
+        normalizedName,
       balanceValue
     );
 

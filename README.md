@@ -47,20 +47,40 @@ npm run build
 npm run start
 ```
 
-## Desktop Packaging & Auto-Update Workflow
+## Release Pipeline
 
-1. **Bump versions** in both `package.json` files (root and `electron-app/`).
-2. Ensure `GH_TOKEN` is set in the shell (`$env:GH_TOKEN = 'github_pat_…'`).
-3. Clean stale artifacts when necessary: `Remove-Item -Recurse -Force .next`.
-4. Package and publish:
+### 1. Prep and Verify
+
+- Run the automated checks: `npm run lint` (root) and `npm run build` to ensure the Next.js bundle compiles cleanly.
+- Optional but recommended: `cd electron-app; npm install; npm run lint` to confirm the shell packages without warnings (return to the root directory afterward).
+- Confirm the point-of-sale discount preview UI renders the expected totals for a sanity check.
+
+### 2. Version and Commit
+
+- Bump the semver in both `package.json` files (root and `electron-app/`).
+- Update any release notes or changelog entry if applicable.
+- Stage the changes and create a release commit (for example, `git commit -am "chore: release vX.Y.Z"`).
+
+### 3. Tag the Release
+
+- Annotate the commit with a version tag: `git tag vX.Y.Z`.
+- Push the branch and tag together: `git push origin master --follow-tags` (adjust branch name as needed).
+
+### 4. Package and Publish the Desktop Build
+
+- Ensure `GH_TOKEN` is set in the shell (`$env:GH_TOKEN = 'github_pat_…'`).
+- Clean stale build artifacts when necessary: `Remove-Item -Recurse -Force .next`.
+- Package and publish the Electron bundle:
    ```bash
    cd electron-app
    npm run package -- --publish always
    ```
-5. Review the draft release on GitHub (`themakkosbox-beep/Canteen-Project-App`) and publish when ready.
-6. Clients running the latest desktop build will download the update automatically and prompt to restart.
+- For local packaging without publishing, use `npm run package -- --publish never`.
 
-For local packaging without publishing, append `-- --publish never`.
+### 5. Finalize the Release
+
+- Review the draft GitHub release (`themakkosbox-beep/Canteen-Project-App`), attach additional assets if necessary, and publish the release.
+- Once published, clients running the desktop build will download the update and prompt for restart after the installer completes.
 
 ## Environment Variables
 
