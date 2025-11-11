@@ -398,7 +398,6 @@ export default function POSPage() {
   const [showProductDropdown, setShowProductDropdown] = useState(false);
   const [products, setProducts] = useState<Product[]>([]);
   const [productsLoading, setProductsLoading] = useState(false);
-  const [categories, setCategories] = useState<string[]>([]);
   const [quickKeySlots, setQuickKeySlots] = useState<QuickKeySlot[]>(createEmptyQuickKeySlots);
   const [loadingQuickKeys, setLoadingQuickKeys] = useState(false);
   const [depositAmount, setDepositAmount] = useState('');
@@ -619,7 +618,6 @@ export default function POSPage() {
   useEffect(() => {
     void loadQuickKeys();
     void loadProducts();
-    void loadCategories();
     void loadAppSettings();
   }, []);
 
@@ -709,20 +707,6 @@ export default function POSPage() {
       setProducts([]);
     } finally {
       setProductsLoading(false);
-    }
-  };
-
-  const loadCategories = async () => {
-    try {
-      const response = await fetch('/api/products/categories');
-      if (!response.ok) {
-        throw new Error('Unable to load categories');
-      }
-      const data: string[] = await response.json();
-      setCategories(data);
-    } catch (error) {
-      console.error('Failed to load categories', error);
-      setCategories([]);
     }
   };
 
@@ -1709,9 +1693,36 @@ export default function POSPage() {
           </section>
         ) : null}
 
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1.4fr_1fr]">
-          <div className="space-y-6">
-            <section className="rounded-xl border border-gray-200 bg-white p-6 shadow">
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(520px,640px)_minmax(0,1fr)] lg:items-start">
+          <section className="rounded-xl border border-gray-200 bg-white p-6 shadow lg:col-start-1 lg:row-start-1">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-base font-semibold text-gray-900">Quick Keys</h2>
+                <p className="text-sm text-gray-500">Pre-configured products for rapid checkout.</p>
+              </div>
+              <button
+                className="rounded-full border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-600 shadow hover:border-camp-500"
+                onClick={() => {
+                  setTrainingMode((prev) => prev);
+                  void loadQuickKeys();
+                }}
+                type="button"
+              >
+                Refresh
+              </button>
+            </div>
+            <div className="mt-4 rounded-lg border border-gray-200 bg-white p-4">
+              {canUseQuickKeys ? (
+                renderQuickKeyGrid()
+              ) : (
+                <div className="rounded-lg border border-dashed border-gray-300 p-4 text-center text-gray-500">
+                  Lookup a customer to enable quick keys.
+                </div>
+              )}
+            </div>
+          </section>
+
+          <section className="rounded-xl border border-gray-200 bg-white p-6 shadow lg:col-start-2 lg:mx-auto lg:w-full lg:max-w-2xl">
               <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
                 <div className="flex flex-1 flex-col gap-3">
                   <label className="text-sm font-medium text-gray-700" htmlFor="customerId">
@@ -1834,9 +1845,6 @@ export default function POSPage() {
                       </div>
                     ) : null}
                   </div>
-                  <p className="text-sm text-gray-500">
-                    Press Enter to charge a scanned barcode immediately, or pick from the suggestions below.
-                  </p>
                 </div>
               </div>
 
@@ -1845,74 +1853,23 @@ export default function POSPage() {
                   Loading products
                 </div>
               ) : (
-                <div className="mt-6 space-y-4">
-                  <div className="flex flex-wrap items-center gap-2 text-xs font-medium text-gray-600">
-                    <span>Quick Filters</span>
-                    {categories.length === 0 ? (
-                      <span className="text-gray-400">No categories yet.</span>
-                    ) : null}
-                    {categories.map((category) => (
-                      <button
-                        key={category}
-                        className="rounded-full border border-gray-200 px-3 py-1 hover:border-camp-500 hover:text-camp-600"
-                        onClick={() => {
-                          setEntryInput(category);
-                          setShowProductDropdown(true);
-                          setTimeout(() => entryInputRef.current?.focus(), 0);
-                        }}
-                        type="button"
-                      >
-                        {category}
-                      </button>
-                    ))}
-                  </div>
-                  <div className="flex flex-col gap-2 rounded-lg border border-gray-200 bg-gray-50 p-3 sm:flex-row sm:items-center sm:justify-between">
-                    <p className="text-sm text-gray-600">
-                      Scanning, pressing Enter, or selecting a suggestion will complete the charge immediately. Use Quick Filters to narrow the list before choosing.
-                    </p>
-                    <button
-                      className="self-start rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-600 shadow hover:border-camp-500 sm:self-auto"
-                      disabled={state.isLoading}
-                      onClick={clearEntryInput}
-                      type="button"
-                    >
-                      Clear Input
-                    </button>
-                  </div>
+                <div className="mt-6 flex flex-col gap-3 rounded-lg border border-gray-200 bg-gray-50 p-3 sm:flex-row sm:items-center sm:justify-between">
+                  <p className="text-sm text-gray-600">
+                    Press Enter to charge a scanned barcode immediately, or pick from the suggestions below.
+                  </p>
+                  <button
+                    className="self-start rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-600 shadow hover:border-camp-500 sm:self-auto"
+                    disabled={state.isLoading}
+                    onClick={clearEntryInput}
+                    type="button"
+                  >
+                    Clear Input
+                  </button>
                 </div>
               )}
             </section>
 
-            <section className="space-y-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h2 className="text-base font-semibold text-gray-900">Quick Keys</h2>
-                  <p className="text-sm text-gray-500">
-                    Pre-configured products for rapid checkout.
-                  </p>
-                </div>
-                <button
-                  className="rounded-full border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-600 shadow hover:border-camp-500"
-                  onClick={() => {
-                    setTrainingMode((prev) => prev);
-                    void loadQuickKeys();
-                  }}
-                  type="button"
-                >
-                  Refresh
-                </button>
-              </div>
-              <div className="rounded-xl border border-gray-200 bg-white p-4">
-                {canUseQuickKeys ? renderQuickKeyGrid() : (
-                  <div className="rounded-lg border border-dashed border-gray-300 p-4 text-center text-gray-500">
-                    Lookup a customer to enable quick keys.
-                  </div>
-                )}
-              </div>
-            </section>
-          </div>
-
-          <aside className="space-y-6">
+          <aside className="space-y-6 lg:col-start-3 lg:row-start-1">
             <section className="rounded-xl border border-gray-200 bg-white p-6 shadow">
               <div className="flex items-center justify-between">
                 <div>

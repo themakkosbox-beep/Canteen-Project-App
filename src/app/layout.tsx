@@ -14,8 +14,14 @@ export default async function RootLayout({
   children: React.ReactNode
 }) {
   const appVersion = process.env.NEXT_PUBLIC_APP_VERSION ?? '0.0.0';
-  const database = DatabaseManager.getInstance();
-  const appSettings = await database.getAppSettings();
+  let brandName = 'Camp Canteen POS';
+  try {
+    const database = DatabaseManager.getInstance();
+    const appSettings = await database.getAppSettings();
+    brandName = appSettings.brandName;
+  } catch (error) {
+    console.error('Failed to load navigation settings, using defaults.', error);
+  }
 
   return (
     <html lang="en">
@@ -23,7 +29,7 @@ export default async function RootLayout({
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
       </head>
       <body className="bg-gray-50 min-h-screen">
-        <Navigation brandName={appSettings.brandName} />
+        <Navigation brandName={brandName} />
         <main className="pt-6">
           {children}
         </main>
