@@ -124,7 +124,7 @@ const SettingsPage: React.FC = () => {
 
     try {
       const response = await fetch('/api/settings/app', {
-        method: 'PUT',
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });

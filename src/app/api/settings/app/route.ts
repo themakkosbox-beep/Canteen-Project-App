@@ -17,7 +17,7 @@ export async function GET() {
   }
 }
 
-export async function PUT(request: NextRequest) {
+const handleWrite = async (request: NextRequest) => {
   try {
     const body = await request.json();
     const brandName =
@@ -81,4 +81,12 @@ export async function PUT(request: NextRequest) {
       400
     );
   }
+};
+
+export async function PUT(request: NextRequest) {
+  return handleWrite(request);
+}
+
+export async function POST(request: NextRequest) {
+  return handleWrite(request);
 }
