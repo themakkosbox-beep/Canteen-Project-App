@@ -12,7 +12,9 @@ import {
   TransactionExportRow,
   TransactionLog,
   TransactionOptionSelection,
+  TransactionStatsSummary,
   AppSettingsPayload,
+  CustomerTypeDefinition,
 } from '@/types/database';
 
 const QUICK_KEY_SETTING_KEY = 'quick_keys';
@@ -26,6 +28,13 @@ const APP_BRAND_NAME_KEY = 'app_brand_name';
 const APP_ADMIN_CODE_KEY = 'app_admin_code';
 const APP_GLOBAL_DISCOUNT_PERCENT_KEY = 'app_global_discount_percent';
 const APP_GLOBAL_DISCOUNT_FLAT_KEY = 'app_global_discount_flat';
+const CUSTOMER_TYPES_SETTING_KEY = 'customer_types_v1';
+
+const DEFAULT_CUSTOMER_TYPES: CustomerTypeDefinition[] = [
+  { id: 'camper', label: 'Camper', discount_percent: 0, discount_flat: 0 },
+  { id: 'staff', label: 'Staff', discount_percent: 0, discount_flat: 0 },
+  { id: 'guest', label: 'Guest', discount_percent: 0, discount_flat: 0 },
+];
 
 const hashAdminCode = (code: string): string =>
   `sha256:${crypto.createHash('sha256').update(code).digest('hex')}`;
@@ -63,6 +72,32 @@ const clampCurrency = (value: unknown): number => {
   return Math.max(0, Math.round(parsed * 100) / 100);
 };
 
+const normalizeTypeId = (value: string): string => {
+  const normalized = value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+/, '')
+    .replace(/-+$/, '');
+  if (!normalized) {
+    return `type-${crypto.randomBytes(3).toString('hex')}`;
+  }
+  return normalized.slice(0, 32);
+};
+
+const clampDiscountValue = (value: unknown, isPercent: boolean): number => {
+  if (typeof value !== 'number' && typeof value !== 'string') {
+    return 0;
+  }
+  const parsed = typeof value === 'number' ? value : Number.parseFloat(value);
+  if (!Number.isFinite(parsed)) {
+    return 0;
+  }
+  if (isPercent) {
+    return Math.max(0, Math.min(100, Math.round(parsed * 100) / 100));
+  }
+  return Math.max(0, Math.round(parsed * 100) / 100);
+};
+
 const doesAdminCodeMatch = (storedHash: string | null, candidate: string): boolean => {
   if (!storedHash || !candidate) {
     return false;
@@ -83,6 +118,7 @@ export interface BulkCustomerInput {
   initialBalance?: number;
   discountPercent?: number;
   discountFlat?: number;
+  typeId?: string | null;
 }
 
 export interface BulkProductInput {
@@ -93,6 +129,13 @@ export interface BulkProductInput {
   category?: string;
   active?: boolean;
   options?: ProductOptionGroup[];
+  discountPercent?: number;
+  discountFlat?: number;
+}
+
+interface CustomerTypeInput {
+  id?: string;
+  label: string;
   discountPercent?: number;
   discountFlat?: number;
 }
@@ -325,6 +368,7 @@ class DatabaseManager {
         balance REAL NOT NULL DEFAULT 0,
         discount_percent REAL DEFAULT 0,
         discount_flat REAL DEFAULT 0,
+        type_id TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
       );
@@ -353,6 +397,7 @@ class DatabaseManager {
         voided BOOLEAN DEFAULT 0,
         voided_at DATETIME,
         void_note TEXT,
+        edit_parent_transaction_id TEXT,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
         staff_id TEXT,
         FOREIGN KEY (customer_id) REFERENCES customers (customer_id),
@@ -369,15 +414,17 @@ class DatabaseManager {
       );
     `);
 
-  this.ensureColumn(db, 'products', 'options_json', 'TEXT');
-  this.ensureColumn(db, 'products', 'discount_percent', 'REAL DEFAULT 0');
-  this.ensureColumn(db, 'products', 'discount_flat', 'REAL DEFAULT 0');
+    this.ensureColumn(db, 'products', 'options_json', 'TEXT');
+    this.ensureColumn(db, 'products', 'discount_percent', 'REAL DEFAULT 0');
+    this.ensureColumn(db, 'products', 'discount_flat', 'REAL DEFAULT 0');
     this.ensureColumn(db, 'customers', 'discount_percent', 'REAL DEFAULT 0');
     this.ensureColumn(db, 'customers', 'discount_flat', 'REAL DEFAULT 0');
+    this.ensureColumn(db, 'customers', 'type_id', 'TEXT');
     this.ensureColumn(db, 'transactions', 'options_json', 'TEXT');
     this.ensureColumn(db, 'transactions', 'voided', 'BOOLEAN DEFAULT 0');
     this.ensureColumn(db, 'transactions', 'voided_at', 'DATETIME');
     this.ensureColumn(db, 'transactions', 'void_note', 'TEXT');
+    this.ensureColumn(db, 'transactions', 'edit_parent_transaction_id', 'TEXT');
   }
 
   private readSetting(db: SqlJsDatabase, key: string): string | null {
@@ -398,6 +445,104 @@ class DatabaseManager {
     stmt.bind([key, value ?? null]);
     stmt.step();
     stmt.free();
+  }
+
+  private normalizeCustomerTypeEntries(entries?: CustomerTypeInput[] | null): CustomerTypeDefinition[] {
+    const list = Array.isArray(entries) ? entries : [];
+    const normalized: CustomerTypeDefinition[] = [];
+    const used = new Set<string>();
+
+    list.forEach((entry) => {
+      if (!entry || typeof entry.label !== 'string') {
+        return;
+      }
+
+      const label = entry.label.trim();
+      if (!label) {
+        return;
+      }
+
+      const preferredId = typeof entry.id === 'string' && entry.id.trim().length > 0
+        ? normalizeTypeId(entry.id.trim())
+        : normalizeTypeId(label);
+
+      let slug = preferredId;
+      let counter = 1;
+      while (used.has(slug)) {
+        slug = `${preferredId}-${counter}`.slice(0, 32);
+        counter += 1;
+      }
+      used.add(slug);
+
+      normalized.push({
+        id: slug,
+        label,
+        discount_percent: clampDiscountValue(entry.discountPercent, true),
+        discount_flat: clampDiscountValue(entry.discountFlat, false),
+      });
+    });
+
+    if (normalized.length === 0) {
+      return DEFAULT_CUSTOMER_TYPES;
+    }
+
+    return normalized;
+  }
+
+  private readCustomerTypesSetting(db: SqlJsDatabase): CustomerTypeDefinition[] {
+    const raw = this.readSetting(db, CUSTOMER_TYPES_SETTING_KEY);
+    if (!raw) {
+      this.writeSetting(db, CUSTOMER_TYPES_SETTING_KEY, JSON.stringify(DEFAULT_CUSTOMER_TYPES));
+      return DEFAULT_CUSTOMER_TYPES;
+    }
+
+    try {
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) {
+        throw new Error('Invalid type payload');
+      }
+
+      const entries: CustomerTypeInput[] = parsed.map((item) => ({
+        id: typeof item?.id === 'string' ? item.id : undefined,
+        label: typeof item?.label === 'string' ? item.label : '',
+        discountPercent: typeof item?.discount_percent === 'number' ? item.discount_percent : undefined,
+        discountFlat: typeof item?.discount_flat === 'number' ? item.discount_flat : undefined,
+      }));
+
+      return this.normalizeCustomerTypeEntries(entries);
+    } catch (error) {
+      console.warn('Failed to parse customer types setting', error);
+      this.writeSetting(db, CUSTOMER_TYPES_SETTING_KEY, JSON.stringify(DEFAULT_CUSTOMER_TYPES));
+      return DEFAULT_CUSTOMER_TYPES;
+    }
+  }
+
+  private writeCustomerTypesSetting(db: SqlJsDatabase, types: CustomerTypeDefinition[]): void {
+    const payload = types.map((type) => ({
+      id: type.id,
+      label: type.label,
+      discount_percent: clampDiscountValue(type.discount_percent, true),
+      discount_flat: clampDiscountValue(type.discount_flat, false),
+    }));
+
+    this.writeSetting(db, CUSTOMER_TYPES_SETTING_KEY, JSON.stringify(payload));
+  }
+
+  private getCustomerTypeMap(db: SqlJsDatabase): Map<string, CustomerTypeDefinition> {
+    const types = this.readCustomerTypesSetting(db);
+    return new Map(types.map((type) => [type.id, type]));
+  }
+
+  public async getCustomerTypes(): Promise<CustomerTypeDefinition[]> {
+    return this.withDatabase((db) => this.readCustomerTypesSetting(db));
+  }
+
+  public async saveCustomerTypes(entries: CustomerTypeInput[]): Promise<CustomerTypeDefinition[]> {
+    return this.withDatabase((db) => {
+      const normalized = this.normalizeCustomerTypeEntries(entries);
+      this.writeCustomerTypesSetting(db, normalized);
+      return normalized;
+    }, true);
   }
 
   private readGlobalDiscount(db: SqlJsDatabase): { percent: number; flat: number } {
@@ -734,11 +879,52 @@ class DatabaseManager {
       typeof (raw as { discount_flat?: unknown }).discount_flat === 'number'
         ? (raw as { discount_flat: number }).discount_flat
         : 0;
+    const typeIdRaw = (raw as { type_id?: unknown }).type_id;
+    const typeId = typeof typeIdRaw === 'string' && typeIdRaw.trim().length > 0 ? typeIdRaw.trim() : null;
 
     return {
       ...raw,
       discount_percent: discountPercent,
       discount_flat: discountFlat,
+      type_id: typeId,
+      type_label: null,
+      type_discount_percent: 0,
+      type_discount_flat: 0,
+    };
+  }
+
+  private decorateCustomerWithType(
+    customer: Customer,
+    typeMap: Map<string, CustomerTypeDefinition>
+  ): Customer {
+    const typeId = customer.type_id && customer.type_id.trim().length > 0 ? customer.type_id.trim() : null;
+    if (!typeId) {
+      return {
+        ...customer,
+        type_id: null,
+        type_label: null,
+        type_discount_percent: 0,
+        type_discount_flat: 0,
+      };
+    }
+
+    const definition = typeMap.get(typeId);
+    if (!definition) {
+      return {
+        ...customer,
+        type_id: typeId,
+        type_label: null,
+        type_discount_percent: 0,
+        type_discount_flat: 0,
+      };
+    }
+
+    return {
+      ...customer,
+      type_id: typeId,
+      type_label: definition.label,
+      type_discount_percent: definition.discount_percent,
+      type_discount_flat: definition.discount_flat,
     };
   }
 
@@ -975,6 +1161,9 @@ class DatabaseManager {
     const rawVoidNote = (raw as { void_note?: unknown }).void_note;
     const voidNote = typeof rawVoidNote === 'string' ? rawVoidNote : null;
 
+    const rawEditParent = (raw as { edit_parent_transaction_id?: unknown }).edit_parent_transaction_id;
+    const editParentId = typeof rawEditParent === 'string' ? rawEditParent : null;
+
     return {
       ...raw,
       voided,
@@ -982,6 +1171,7 @@ class DatabaseManager {
       voided_at: voidedAt,
       void_note: voidNote,
       options,
+      edit_parent_transaction_id: editParentId,
     };
   }
 
@@ -1056,7 +1246,8 @@ class DatabaseManager {
     name: string,
     initialBalance: number = 0,
     discountPercent: number = 0,
-    discountFlat: number = 0
+    discountFlat: number = 0,
+    typeId?: string | null
   ): Promise<Customer> {
     if (!/^[0-9]{4}$/.test(customerId)) {
       throw new Error('Customer ID must be exactly 4 digits');
@@ -1079,6 +1270,10 @@ class DatabaseManager {
       Number.isFinite(discountFlat) && discountFlat > 0 ? Math.max(0, discountFlat) : 0;
 
     return this.withDatabase((db) => {
+      const typeMap = this.getCustomerTypeMap(db);
+      const normalizedTypeId =
+        typeof typeId === 'string' && typeId.trim().length > 0 ? typeId.trim() : null;
+      const storedTypeId = normalizedTypeId && typeMap.has(normalizedTypeId) ? normalizedTypeId : null;
       const existingStmt = db.prepare(
         'SELECT 1 FROM customers WHERE customer_id = ?'
       );
@@ -1091,8 +1286,8 @@ class DatabaseManager {
       }
 
       const insertStmt = db.prepare(`
-        INSERT INTO customers (customer_id, name, balance, discount_percent, discount_flat)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO customers (customer_id, name, balance, discount_percent, discount_flat, type_id)
+        VALUES (?, ?, ?, ?, ?, ?)
       `);
       insertStmt.bind([
         customerId,
@@ -1100,6 +1295,7 @@ class DatabaseManager {
         initialBalance,
         normalizedPercent,
         normalizedFlat,
+        storedTypeId,
       ]);
       insertStmt.step();
       insertStmt.free();
@@ -1137,7 +1333,7 @@ class DatabaseManager {
         throw new Error('Failed to create customer');
       }
 
-      return this.hydrateCustomer(customerRow);
+      return this.decorateCustomerWithType(this.hydrateCustomer(customerRow), typeMap);
     }, true);
   }
 
@@ -1149,6 +1345,7 @@ class DatabaseManager {
     const trimmedSearch = search?.trim();
 
     return this.withDatabase((db) => {
+      const typeMap = this.getCustomerTypeMap(db);
       if (trimmedSearch && trimmedSearch.length > 0) {
         const stmt = db.prepare(`
           SELECT *
@@ -1162,7 +1359,9 @@ class DatabaseManager {
           `%${trimmedSearch}%`,
           normalizedLimit,
         ]);
-        return this.fetchAll<Customer>(stmt).map((customer) => this.hydrateCustomer(customer));
+        return this.fetchAll<Customer>(stmt)
+          .map((customer) => this.hydrateCustomer(customer))
+          .map((customer) => this.decorateCustomerWithType(customer, typeMap));
       }
 
       const stmt = db.prepare(`
@@ -1172,7 +1371,9 @@ class DatabaseManager {
         LIMIT ?
       `);
       stmt.bind([normalizedLimit]);
-      return this.fetchAll<Customer>(stmt).map((customer) => this.hydrateCustomer(customer));
+      return this.fetchAll<Customer>(stmt)
+        .map((customer) => this.hydrateCustomer(customer))
+        .map((customer) => this.decorateCustomerWithType(customer, typeMap));
     });
   }
 
@@ -1323,10 +1524,11 @@ class DatabaseManager {
 
   public async getCustomerById(customerId: string): Promise<Customer | null> {
     return this.withDatabase((db) => {
+      const typeMap = this.getCustomerTypeMap(db);
       const stmt = db.prepare('SELECT * FROM customers WHERE customer_id = ?');
       stmt.bind([customerId]);
       const customer = this.fetchOne<Customer>(stmt);
-      return customer ? this.hydrateCustomer(customer) : null;
+      return customer ? this.decorateCustomerWithType(this.hydrateCustomer(customer), typeMap) : null;
     });
   }
 
@@ -1349,6 +1551,69 @@ class DatabaseManager {
         ...this.hydrateTransaction(row),
         product_name: row.product_name,
       }));
+    });
+  }
+
+  public async getTransactionStatsSummary(): Promise<TransactionStatsSummary> {
+    return this.withDatabase((db) => {
+      const stmt = db.prepare(`
+        SELECT
+          SUM(CASE WHEN COALESCE(voided, 0) <> 1 THEN 1 ELSE 0 END) AS total_transactions,
+          SUM(CASE WHEN COALESCE(voided, 0) <> 1 AND type = 'deposit' THEN 1 ELSE 0 END) AS total_deposits,
+          SUM(CASE WHEN COALESCE(voided, 0) <> 1 AND type = 'withdrawal' THEN 1 ELSE 0 END) AS total_withdrawals,
+          SUM(CASE WHEN COALESCE(voided, 0) <> 1 AND type = 'purchase' THEN 1 ELSE 0 END) AS total_purchases,
+          SUM(CASE WHEN COALESCE(voided, 0) <> 1 AND type = 'adjustment' THEN 1 ELSE 0 END) AS total_adjustments,
+          SUM(CASE WHEN COALESCE(voided, 0) <> 1 AND type = 'deposit' THEN amount ELSE 0 END) AS sum_deposits,
+          SUM(CASE WHEN COALESCE(voided, 0) <> 1 AND type = 'withdrawal' THEN ABS(amount) ELSE 0 END) AS sum_withdrawals,
+          SUM(CASE WHEN COALESCE(voided, 0) <> 1 AND type = 'purchase' THEN ABS(amount) ELSE 0 END) AS sum_purchases,
+          SUM(CASE WHEN COALESCE(voided, 0) <> 1 AND type = 'adjustment' THEN ABS(amount) ELSE 0 END) AS sum_adjustments,
+          SUM(CASE WHEN COALESCE(voided, 0) = 1 THEN 1 ELSE 0 END) AS voided_transactions,
+          MAX(CASE WHEN COALESCE(voided, 0) <> 1 THEN timestamp ELSE NULL END) AS last_transaction_at
+        FROM transactions
+      `);
+
+      const row = this.fetchOne<{
+        total_transactions: number | null;
+        total_deposits: number | null;
+        total_withdrawals: number | null;
+        total_purchases: number | null;
+        total_adjustments: number | null;
+        sum_deposits: number | null;
+        sum_withdrawals: number | null;
+        sum_purchases: number | null;
+        sum_adjustments: number | null;
+        voided_transactions: number | null;
+        last_transaction_at: string | null;
+      }>(stmt) ?? {
+        total_transactions: 0,
+        total_deposits: 0,
+        total_withdrawals: 0,
+        total_purchases: 0,
+        total_adjustments: 0,
+        sum_deposits: 0,
+        sum_withdrawals: 0,
+        sum_purchases: 0,
+        sum_adjustments: 0,
+        voided_transactions: 0,
+        last_transaction_at: null,
+      };
+
+      const toNumber = (value: number | null | undefined) =>
+        typeof value === 'number' && Number.isFinite(value) ? value : 0;
+
+      return {
+        totalTransactions: toNumber(row.total_transactions),
+        totalDeposits: toNumber(row.total_deposits),
+        totalWithdrawals: toNumber(row.total_withdrawals),
+        totalPurchases: toNumber(row.total_purchases),
+        totalAdjustments: toNumber(row.total_adjustments),
+        totalAmountDeposits: toNumber(row.sum_deposits),
+        totalAmountWithdrawals: toNumber(row.sum_withdrawals),
+        totalAmountPurchases: toNumber(row.sum_purchases),
+        totalAmountAdjustments: toNumber(row.sum_adjustments),
+        voidedTransactions: toNumber(row.voided_transactions),
+        lastTransactionAt: typeof row.last_transaction_at === 'string' ? row.last_transaction_at : null,
+      };
     });
   }
 
@@ -1416,7 +1681,8 @@ class DatabaseManager {
       if (!customerRow) {
         throw new Error('Customer not found');
       }
-      const customer = this.hydrateCustomer(customerRow);
+      const typeMap = this.getCustomerTypeMap(db);
+      const customer = this.decorateCustomerWithType(this.hydrateCustomer(customerRow), typeMap);
 
       let product: Product | null = null;
       if (barcode) {
@@ -1453,8 +1719,9 @@ class DatabaseManager {
 
       let finalPrice = optionAdjustedPrice;
       finalPrice = this.applyDiscount(finalPrice, globalDiscount.percent, globalDiscount.flat);
-      finalPrice = this.applyDiscount(finalPrice, product.discount_percent, product.discount_flat);
-      finalPrice = this.applyDiscount(finalPrice, customer.discount_percent, customer.discount_flat);
+  finalPrice = this.applyDiscount(finalPrice, product.discount_percent, product.discount_flat);
+  finalPrice = this.applyDiscount(finalPrice, customer.discount_percent, customer.discount_flat);
+  finalPrice = this.applyDiscount(finalPrice, customer.type_discount_percent, customer.type_discount_flat);
       finalPrice = this.roundCurrency(finalPrice);
 
       if (currentBalance + 0.00001 < finalPrice) {
@@ -1566,7 +1833,9 @@ class DatabaseManager {
         throw new Error('Product ID is required');
       }
 
-      const transactionStmt = db.prepare('SELECT * FROM transactions WHERE transaction_id = ?');
+  const typeMap = this.getCustomerTypeMap(db);
+
+  const transactionStmt = db.prepare('SELECT * FROM transactions WHERE transaction_id = ?');
       transactionStmt.bind([normalizedTransactionId]);
       const transactionRow = this.fetchOne<Transaction>(transactionStmt);
       transactionStmt.free();
@@ -1598,7 +1867,7 @@ class DatabaseManager {
         throw new Error('Customer not found');
       }
 
-      const customer = this.hydrateCustomer(customerRow);
+      const customer = this.decorateCustomerWithType(this.hydrateCustomer(customerRow), typeMap);
 
       const productStmt = db.prepare(
         'SELECT * FROM products WHERE product_id = ? AND active = 1'
@@ -1625,8 +1894,9 @@ class DatabaseManager {
 
       let finalPrice = optionAdjustedPrice;
       finalPrice = this.applyDiscount(finalPrice, globalDiscount.percent, globalDiscount.flat);
-      finalPrice = this.applyDiscount(finalPrice, product.discount_percent, product.discount_flat);
-      finalPrice = this.applyDiscount(finalPrice, customer.discount_percent, customer.discount_flat);
+  finalPrice = this.applyDiscount(finalPrice, product.discount_percent, product.discount_flat);
+  finalPrice = this.applyDiscount(finalPrice, customer.discount_percent, customer.discount_flat);
+  finalPrice = this.applyDiscount(finalPrice, customer.type_discount_percent, customer.type_discount_flat);
       finalPrice = this.roundCurrency(finalPrice);
 
       const originalAmount = this.roundCurrency(originalTransaction.amount);
@@ -1708,8 +1978,9 @@ class DatabaseManager {
           amount,
           balance_after,
           note,
-          options_json
-        ) VALUES (?, ?, 'purchase', ?, ?, ?, ?, ?)
+          options_json,
+          edit_parent_transaction_id
+        ) VALUES (?, ?, 'purchase', ?, ?, ?, ?, ?, ?)
       `);
       insertStmt.bind([
         replacementTransactionId,
@@ -1719,6 +1990,7 @@ class DatabaseManager {
         newBalance,
         normalizedNote,
         selectionJson,
+        normalizedTransactionId,
       ]);
       insertStmt.step();
       insertStmt.free();
@@ -1754,6 +2026,168 @@ class DatabaseManager {
         oldTransactionId: normalizedTransactionId,
         voidedTransaction,
         balanceAfter: newBalance,
+      };
+    }, true);
+  }
+
+  public async updateBalanceDeltaTransaction(
+    transactionId: string,
+    payload: {
+      customerId: string;
+      amount: number;
+      note?: string;
+    }
+  ): Promise<{
+    transaction: Transaction;
+    voidedTransaction: Transaction;
+    balanceAfter: number;
+    oldTransactionId: string;
+  }> {
+    return this.withDatabase((db) => {
+      const normalizedTransactionId = typeof transactionId === 'string' ? transactionId.trim() : '';
+      if (!normalizedTransactionId) {
+        throw new Error('Transaction ID is required');
+      }
+
+      const amountInput = typeof payload.amount === 'number' ? payload.amount : Number.NaN;
+      if (!Number.isFinite(amountInput)) {
+        throw new Error('Amount must be numeric');
+      }
+
+      const transactionStmt = db.prepare('SELECT * FROM transactions WHERE transaction_id = ?');
+      transactionStmt.bind([normalizedTransactionId]);
+      const transactionRow = this.fetchOne<Transaction>(transactionStmt);
+      transactionStmt.free();
+
+      if (!transactionRow) {
+        throw new Error('Transaction not found');
+      }
+
+      const transaction = this.hydrateTransaction(transactionRow);
+
+      if (transaction.voided) {
+        throw new Error('This transaction was already voided');
+      }
+
+      if (transaction.type !== 'deposit' && transaction.type !== 'adjustment') {
+        throw new Error('Only deposits or adjustments can be edited here');
+      }
+
+      const normalizedCustomerId = typeof payload.customerId === 'string' ? payload.customerId.trim() : '';
+      if (!/^[0-9]{4}$/.test(normalizedCustomerId)) {
+        throw new Error('Customer ID must match original transaction');
+      }
+
+      if (transaction.customer_id !== normalizedCustomerId) {
+        throw new Error('Transaction does not belong to this customer');
+      }
+
+  const nextAmount = this.roundCurrency(amountInput);
+      if (transaction.type === 'deposit' && nextAmount <= 0) {
+        throw new Error('Deposits must be a positive amount');
+      }
+      if (transaction.type === 'adjustment' && nextAmount === 0) {
+        throw new Error('Adjustment amount cannot be zero');
+      }
+
+      const originalAmount = this.roundCurrency(transaction.amount);
+      if (Math.abs(originalAmount - nextAmount) < 0.005 && (transaction.note ?? '') === (payload.note ?? '')) {
+        throw new Error('No changes detected for this entry');
+      }
+
+      const customerStmt = db.prepare('SELECT * FROM customers WHERE customer_id = ?');
+      customerStmt.bind([normalizedCustomerId]);
+      const customerRow = this.fetchOne<Customer>(customerStmt);
+      customerStmt.free();
+
+      if (!customerRow) {
+        throw new Error('Customer not found');
+      }
+
+      const customer = this.hydrateCustomer(customerRow);
+      const currentBalance = this.roundCurrency(customer.balance);
+      const preBalance = this.roundCurrency(currentBalance - originalAmount);
+
+      let newBalance = this.roundCurrency(preBalance + nextAmount);
+      if (newBalance < 0 && newBalance > -0.01) {
+        newBalance = 0;
+      }
+
+      if (newBalance < 0) {
+        throw new Error('Resulting balance would be negative');
+      }
+
+      const replacementTransactionId = this.generateTransactionId();
+      const normalizedNote = typeof payload.note === 'string' && payload.note.trim().length > 0 ? payload.note.trim() : null;
+
+      const updateCustomerStmt = db.prepare(`
+        UPDATE customers
+        SET balance = ?, updated_at = datetime('now')
+        WHERE customer_id = ?
+      `);
+      updateCustomerStmt.bind([newBalance, normalizedCustomerId]);
+      updateCustomerStmt.step();
+      updateCustomerStmt.free();
+
+      const voidNote = `Superseded by edit ${replacementTransactionId}`;
+      const voidStmt = db.prepare(`
+        UPDATE transactions
+        SET voided = 1,
+            voided_at = datetime('now'),
+            void_note = ?
+        WHERE transaction_id = ?
+      `);
+      voidStmt.bind([voidNote, normalizedTransactionId]);
+      voidStmt.step();
+      voidStmt.free();
+
+      const insertStmt = db.prepare(`
+        INSERT INTO transactions (
+          transaction_id,
+          customer_id,
+          type,
+          amount,
+          balance_after,
+          note,
+          edit_parent_transaction_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+      insertStmt.bind([
+        replacementTransactionId,
+        normalizedCustomerId,
+        transaction.type,
+        nextAmount,
+        newBalance,
+        normalizedNote,
+        normalizedTransactionId,
+      ]);
+      insertStmt.step();
+      insertStmt.free();
+
+      const selectNewStmt = db.prepare('SELECT * FROM transactions WHERE transaction_id = ?');
+      selectNewStmt.bind([replacementTransactionId]);
+      const newTransactionRow = this.fetchOne<Transaction>(selectNewStmt);
+      selectNewStmt.free();
+
+      if (!newTransactionRow) {
+        throw new Error('Failed to record updated transaction');
+      }
+
+      const newTransaction = this.hydrateTransaction(newTransactionRow);
+
+      const selectOldStmt = db.prepare('SELECT * FROM transactions WHERE transaction_id = ?');
+      selectOldStmt.bind([normalizedTransactionId]);
+      const oldRow = this.fetchOne<Transaction>(selectOldStmt);
+      selectOldStmt.free();
+      const voidedTransaction = oldRow
+        ? this.hydrateTransaction(oldRow)
+        : { ...transaction, voided: true, void_note: voidNote, voided_at: new Date().toISOString() };
+
+      return {
+        transaction: newTransaction,
+        voidedTransaction,
+        balanceAfter: newBalance,
+        oldTransactionId: normalizedTransactionId,
       };
     }, true);
   }
@@ -1882,7 +2316,8 @@ class DatabaseManager {
           t.voided,
           t.void_note,
           t.options_json,
-          t.staff_id
+          t.staff_id,
+          t.edit_parent_transaction_id
         FROM transactions t
         LEFT JOIN customers c ON c.customer_id = t.customer_id
         LEFT JOIN products p ON p.product_id = t.product_id
@@ -2255,7 +2690,7 @@ class DatabaseManager {
     }, true);
   }
 
-  public async deleteTransaction(transactionId: string) {
+  public async deleteTransaction(transactionId: string, note?: string) {
     if (!transactionId) {
       throw new Error('Transaction ID is required');
     }
@@ -2272,6 +2707,10 @@ class DatabaseManager {
       }
 
       const transaction = this.hydrateTransaction(transactionRow);
+
+      if (transaction.voided) {
+        throw new Error('Transaction is already voided');
+      }
 
       if (transaction.type !== 'purchase' && transaction.type !== 'deposit') {
         throw new Error('Only purchase or deposit transactions can be deleted');
@@ -2315,15 +2754,131 @@ class DatabaseManager {
       updateStmt.step();
       updateStmt.free();
 
-      const deleteStmt = db.prepare(
-        'DELETE FROM transactions WHERE transaction_id = ?'
-      );
-      deleteStmt.bind([transactionId]);
-      deleteStmt.step();
-      deleteStmt.free();
+      const voidNote = note?.trim() && note.trim().length > 0 ? note.trim() : 'Voided manually';
+      const voidStmt = db.prepare(`
+        UPDATE transactions
+        SET voided = 1,
+            voided_at = datetime('now'),
+            void_note = ?
+        WHERE transaction_id = ?
+      `);
+      voidStmt.bind([voidNote, transactionId]);
+      voidStmt.step();
+      voidStmt.free();
+
+      const refreshedStmt = db.prepare('SELECT * FROM transactions WHERE transaction_id = ?');
+      refreshedStmt.bind([transactionId]);
+      const refreshedRow = this.fetchOne<Transaction>(refreshedStmt);
+      refreshedStmt.free();
+
+      const updatedTransaction = refreshedRow
+        ? this.hydrateTransaction(refreshedRow)
+        : { ...transaction, voided: true, void_note: voidNote, voided_at: new Date().toISOString() };
 
       return {
-        transaction,
+        transaction: updatedTransaction,
+        customerId: transaction.customer_id,
+        newBalance,
+      };
+    }, true);
+  }
+
+  public async unvoidTransaction(transactionId: string, note?: string) {
+    if (!transactionId) {
+      throw new Error('Transaction ID is required');
+    }
+
+    return this.withDatabase((db) => {
+      const transactionStmt = db.prepare(
+        'SELECT * FROM transactions WHERE transaction_id = ?'
+      );
+      transactionStmt.bind([transactionId]);
+      const transactionRow = this.fetchOne<Transaction>(transactionStmt);
+      transactionStmt.free();
+
+      if (!transactionRow) {
+        throw new Error('Transaction not found');
+      }
+
+      const transaction = this.hydrateTransaction(transactionRow);
+
+      if (!transaction.voided) {
+        throw new Error('This transaction is not voided');
+      }
+
+      if (transaction.type !== 'purchase' && transaction.type !== 'deposit') {
+        throw new Error('Only purchase or deposit transactions can be unvoided');
+      }
+
+      const latestStmt = db.prepare(`
+        SELECT transaction_id
+        FROM transactions
+        WHERE customer_id = ?
+        ORDER BY timestamp DESC, id DESC
+        LIMIT 1
+      `);
+      latestStmt.bind([transaction.customer_id]);
+      const latest = this.fetchOne<{ transaction_id: string }>(latestStmt);
+      latestStmt.free();
+
+      if (!latest || latest.transaction_id !== transactionId) {
+        throw new Error('Only the most recent transaction for the customer can be unvoided');
+      }
+
+      const customerStmt = db.prepare(
+        'SELECT * FROM customers WHERE customer_id = ?'
+      );
+      customerStmt.bind([transaction.customer_id]);
+      const customer = this.fetchOne<Customer>(customerStmt);
+      customerStmt.free();
+
+      if (!customer) {
+        throw new Error('Customer not found');
+      }
+
+      const currentBalance = this.roundCurrency(customer.balance);
+      const amount = this.roundCurrency(transaction.amount);
+      let newBalance = this.roundCurrency(currentBalance + amount);
+      if (newBalance < 0 && newBalance > -0.01) {
+        newBalance = 0;
+      }
+
+      if (newBalance < 0) {
+        throw new Error('Insufficient balance to restore this transaction');
+      }
+
+      const updateCustomerStmt = db.prepare(`
+        UPDATE customers
+        SET balance = ?, updated_at = datetime('now')
+        WHERE customer_id = ?
+      `);
+      updateCustomerStmt.bind([newBalance, transaction.customer_id]);
+      updateCustomerStmt.step();
+      updateCustomerStmt.free();
+
+      const unvoidNote = note?.trim() && note.trim().length > 0 ? note.trim() : null;
+      const unvoidStmt = db.prepare(`
+        UPDATE transactions
+        SET voided = 0,
+            voided_at = NULL,
+            void_note = ?
+        WHERE transaction_id = ?
+      `);
+      unvoidStmt.bind([unvoidNote, transactionId]);
+      unvoidStmt.step();
+      unvoidStmt.free();
+
+      const refreshedStmt = db.prepare('SELECT * FROM transactions WHERE transaction_id = ?');
+      refreshedStmt.bind([transactionId]);
+      const refreshedRow = this.fetchOne<Transaction>(refreshedStmt);
+      refreshedStmt.free();
+
+      const updatedTransaction = refreshedRow
+        ? this.hydrateTransaction(refreshedRow)
+        : { ...transaction, voided: false, void_note: unvoidNote, voided_at: null };
+
+      return {
+        transaction: updatedTransaction,
         customerId: transaction.customer_id,
         newBalance,
       };
@@ -2339,30 +2894,52 @@ class DatabaseManager {
 
   public async updateCustomer(
     customerId: string,
-    updates: { name?: string }
+    updates: { name?: string; discountPercent?: number | null; discountFlat?: number | null; typeId?: string | null }
   ): Promise<Customer> {
-    const nextName = updates.name?.trim();
-    if (!nextName) {
-      throw new Error('Customer name is required');
-    }
-
     return this.withDatabase((db) => {
+      const typeMap = this.getCustomerTypeMap(db);
       const existingStmt = db.prepare(
         'SELECT * FROM customers WHERE customer_id = ?'
       );
       existingStmt.bind([customerId]);
-      const existing = this.fetchOne<Customer>(existingStmt);
+      const existingRow = this.fetchOne<Customer>(existingStmt);
 
-      if (!existing) {
+      if (!existingRow) {
         throw new Error('Customer not found');
       }
 
+      const existing = this.hydrateCustomer(existingRow);
+
+      const nextName =
+        updates.name === undefined ? existing.name?.trim() ?? '' : updates.name.trim();
+      if (!nextName) {
+        throw new Error('Customer name is required');
+      }
+
+      const nextDiscountPercent =
+        updates.discountPercent === undefined
+          ? existing.discount_percent ?? 0
+          : clampDiscountValue(updates.discountPercent, true);
+
+      const nextDiscountFlat =
+        updates.discountFlat === undefined
+          ? existing.discount_flat ?? 0
+          : clampDiscountValue(updates.discountFlat, false);
+
+      const requestedTypeId =
+        updates.typeId === undefined
+          ? existing.type_id ?? null
+          : updates.typeId && updates.typeId.trim().length > 0
+          ? updates.typeId.trim()
+          : null;
+      const storedTypeId = requestedTypeId && typeMap.has(requestedTypeId) ? requestedTypeId : null;
+
       const updateStmt = db.prepare(`
         UPDATE customers
-        SET name = ?, updated_at = datetime('now')
+        SET name = ?, discount_percent = ?, discount_flat = ?, type_id = ?, updated_at = datetime('now')
         WHERE customer_id = ?
       `);
-      updateStmt.bind([nextName, customerId]);
+      updateStmt.bind([nextName, nextDiscountPercent, nextDiscountFlat, storedTypeId, customerId]);
       updateStmt.step();
       updateStmt.free();
 
@@ -2376,7 +2953,7 @@ class DatabaseManager {
         throw new Error('Failed to update customer');
       }
 
-      return this.hydrateCustomer(customer);
+      return this.decorateCustomerWithType(this.hydrateCustomer(customer), typeMap);
     }, true);
   }
 
@@ -2527,7 +3104,8 @@ class DatabaseManager {
           entry.name,
           entry.initialBalance ?? 0,
           entry.discountPercent ?? 0,
-          entry.discountFlat ?? 0
+          entry.discountFlat ?? 0,
+          entry.typeId ?? null
         );
         created.push(customer);
       } catch (error) {

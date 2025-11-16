@@ -62,6 +62,15 @@ interface EditModalState {
   submitting: boolean;
 }
 
+interface BalanceEditModalState {
+  open: boolean;
+  transaction: TransactionLog | null;
+  amount: string;
+  note: string;
+  error: string | null;
+  submitting: boolean;
+}
+
 interface OptionEvaluationResult {
   productSelections: ProductOptionSelection[];
   transactionSelections: TransactionOptionSelection[];
@@ -190,6 +199,15 @@ const createEmptyEditModalState = (): EditModalState => ({
   product: null,
   productId: '',
   selections: {},
+  note: '',
+  error: null,
+  submitting: false,
+});
+
+const createEmptyBalanceEditModalState = (): BalanceEditModalState => ({
+  open: false,
+  transaction: null,
+  amount: '',
   note: '',
   error: null,
   submitting: false,
@@ -411,6 +429,7 @@ export default function POSPage() {
   const [activeTrainingCustomerId, setActiveTrainingCustomerId] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState(() => new Date());
   const [deletingTransactionId, setDeletingTransactionId] = useState<string | null>(null);
+  const [unvoidingTransactionId, setUnvoidingTransactionId] = useState<string | null>(null);
   const [appSettings, setAppSettings] = useState<AppSettingsPayload | null>(null);
   const [appSettingsError, setAppSettingsError] = useState<string | null>(null);
   const [exportingCsv, setExportingCsv] = useState(false);
@@ -419,6 +438,9 @@ export default function POSPage() {
   );
   const [editModalState, setEditModalState] = useState<EditModalState>(() =>
     createEmptyEditModalState()
+  );
+  const [balanceEditModalState, setBalanceEditModalState] = useState<BalanceEditModalState>(() =>
+    createEmptyBalanceEditModalState()
   );
 
   const entryInputRef = useRef<HTMLInputElement>(null);
@@ -1212,7 +1234,7 @@ export default function POSPage() {
     startProductPurchase(product, { productId: product.product_id });
   };
 
-  const openEditModal = (transaction: TransactionLog) => {
+  const openPurchaseEditModal = (transaction: TransactionLog) => {
     if (trainingMode || transaction.type !== 'purchase' || !transaction.transaction_id) {
       return;
     }
@@ -1249,12 +1271,44 @@ export default function POSPage() {
     });
   };
 
+  const openBalanceEditModal = (transaction: TransactionLog) => {
+    if (
+      trainingMode ||
+      !transaction.transaction_id ||
+      (transaction.type !== 'deposit' && transaction.type !== 'adjustment')
+    ) {
+      return;
+    }
+
+    const initialAmount = Number.isFinite(transaction.amount)
+      ? roundCurrency(transaction.amount).toString()
+      : '';
+
+    setState((prev) => ({ ...prev, error: null }));
+    setBalanceEditModalState({
+      ...createEmptyBalanceEditModalState(),
+      open: true,
+      transaction,
+      amount: initialAmount,
+      note: transaction.note ?? '',
+    });
+  };
+
   const closeEditModal = () => {
     setEditModalState((prev) => {
       if (prev.submitting) {
         return prev;
       }
       return createEmptyEditModalState();
+    });
+  };
+
+  const closeBalanceEditModal = () => {
+    setBalanceEditModalState((prev) => {
+      if (prev.submitting) {
+        return prev;
+      }
+      return createEmptyBalanceEditModalState();
     });
   };
 
@@ -1413,6 +1467,58 @@ export default function POSPage() {
     }
   };
 
+  const handleBalanceEditSubmit = async () => {
+    if (!balanceEditModalState.open || !balanceEditModalState.transaction || trainingMode) {
+      return;
+    }
+
+    const transactionId = balanceEditModalState.transaction.transaction_id;
+    if (!transactionId) {
+      setBalanceEditModalState((prev) => ({ ...prev, error: 'Unable to edit this entry.' }));
+      return;
+    }
+
+    const parsedAmount = Number.parseFloat(balanceEditModalState.amount);
+    if (!Number.isFinite(parsedAmount)) {
+      setBalanceEditModalState((prev) => ({ ...prev, error: 'Enter a valid amount.' }));
+      return;
+    }
+
+    const normalizedNote = balanceEditModalState.note.trim();
+    const customerId = balanceEditModalState.transaction.customer_id;
+
+    setState((prev) => ({ ...prev, isLoading: true, error: null }));
+    setBalanceEditModalState((prev) => ({ ...prev, submitting: true, error: null }));
+
+    try {
+      const response = await fetch(`/api/transactions/${encodeURIComponent(transactionId)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          transactionType: 'balance-delta',
+          customerId,
+          amount: parsedAmount,
+          note: normalizedNote || undefined,
+        }),
+      });
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(
+          typeof data?.error === 'string' ? data.error : 'Failed to update transaction'
+        );
+      }
+
+      await loadCustomer(customerId);
+      setBalanceEditModalState(createEmptyBalanceEditModalState());
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Failed to update transaction';
+      setState((prev) => ({ ...prev, isLoading: false, error: message }));
+      setBalanceEditModalState((prev) => ({ ...prev, submitting: false, error: message }));
+    }
+  };
+
   const handlePrimaryCharge = () => {
     if (!state.currentCustomer || state.isLoading) {
       return;
@@ -1483,6 +1589,44 @@ export default function POSPage() {
       }));
     } finally {
       setDeletingTransactionId(null);
+    }
+  };
+
+  const handleUnvoidTransaction = async (transaction: TransactionLog) => {
+    if (!state.currentCustomer || trainingMode) {
+      return;
+    }
+
+    const id = transaction.transaction_id;
+    if (!id) {
+      setState((prev) => ({ ...prev, error: 'This entry cannot be updated because it is missing an ID.' }));
+      return;
+    }
+
+    setState((prev) => ({ ...prev, error: null }));
+    setUnvoidingTransactionId(id);
+    try {
+      const response = await fetch(`/api/transactions/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'unvoid' }),
+      });
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(
+          typeof data?.error === 'string' ? data.error : 'Failed to unvoid transaction'
+        );
+      }
+
+      await loadCustomer(state.currentCustomer.customer_id);
+    } catch (error) {
+      setState((prev) => ({
+        ...prev,
+        error: error instanceof Error ? error.message : 'Failed to unvoid transaction',
+      }));
+    } finally {
+      setUnvoidingTransactionId(null);
     }
   };
 
@@ -2099,16 +2243,38 @@ export default function POSPage() {
                       !trainingMode &&
                       Boolean(transaction.transaction_id) &&
                       !transaction.voided;
-                    const canEdit =
+                    const canEditPurchase =
                       !trainingMode &&
                       transaction.type === 'purchase' &&
                       Boolean(transaction.transaction_id) &&
                       !transaction.voided;
+                    const canEditBalanceDelta =
+                      !trainingMode &&
+                      (transaction.type === 'deposit' || transaction.type === 'adjustment') &&
+                      Boolean(transaction.transaction_id) &&
+                      !transaction.voided;
                     const isDeleting =
                       canDelete && deletingTransactionId === transaction.transaction_id;
+                    const canUnvoid =
+                      !trainingMode &&
+                      transaction.voided &&
+                      Boolean(transaction.transaction_id);
+                    const isUnvoiding =
+                      canUnvoid && unvoidingTransactionId === transaction.transaction_id;
                     const amountClass = transaction.voided
                       ? 'text-sm font-semibold text-gray-400 line-through'
                       : `text-sm font-semibold ${amountPositive ? 'text-camp-600' : 'text-red-600'}`;
+                    const isEdited = Boolean(transaction.edit_parent_transaction_id);
+                    const baseLabel = transaction.type === 'purchase'
+                      ? transaction.product_name ?? 'Purchase'
+                      : transaction.type === 'deposit'
+                      ? 'Deposit'
+                      : 'Adjustment';
+                    const primaryLabel = isEdited ? 'Edit' : baseLabel;
+                    const supportingLabel = isEdited ? baseLabel : null;
+                    const renderedNote = isEdited
+                      ? `Edit${transaction.note ? `: ${transaction.note}` : ''}`
+                      : transaction.note ?? null;
 
                     return (
                       <div
@@ -2117,15 +2283,12 @@ export default function POSPage() {
                       >
                         <div className="flex items-start justify-between gap-3">
                           <div>
-                            <p className="text-sm font-semibold text-gray-800">
-                              {transaction.type === 'purchase'
-                                ? transaction.product_name ?? 'Purchase'
-                                : transaction.type === 'deposit'
-                                ? 'Deposit'
-                                : 'Adjustment'}
-                            </p>
-                            {transaction.note ? (
-                              <p className="text-xs text-gray-500">{transaction.note}</p>
+                            <p className="text-sm font-semibold text-gray-800">{primaryLabel}</p>
+                            {supportingLabel ? (
+                              <p className="text-xs text-gray-500">{supportingLabel}</p>
+                            ) : null}
+                            {renderedNote ? (
+                              <p className="text-xs text-gray-500">{renderedNote}</p>
                             ) : null}
                             {Array.isArray(transaction.options) && transaction.options.length ? (
                               <div className="mt-2 space-y-1">
@@ -2142,6 +2305,11 @@ export default function POSPage() {
                                 ))}
                               </div>
                             ) : null}
+                            {transaction.void_note ? (
+                              <p className="mt-2 text-xs font-semibold text-red-600">
+                                Void note: {transaction.void_note}
+                              </p>
+                            ) : null}
                           </div>
                           <div className="flex flex-col items-end gap-2 text-right sm:flex-row sm:items-center sm:gap-3">
                             <span className={amountClass}>
@@ -2149,16 +2317,31 @@ export default function POSPage() {
                                 ? `+${formatCurrency(transaction.amount)}`
                                 : `-${formatCurrency(Math.abs(transaction.amount))}`}
                             </span>
+                            {isEdited ? (
+                              <span className="rounded-full bg-blue-100 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-blue-700">
+                                Edited
+                              </span>
+                            ) : null}
                             {transaction.voided ? (
                               <span className="rounded-full bg-red-100 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-red-700">
                                 Voided
                               </span>
                             ) : null}
-                            {canEdit ? (
+                            {canEditPurchase ? (
                               <button
                                 className="rounded-full border border-gray-300 px-3 py-1 text-xs font-semibold text-gray-600 shadow-sm hover:border-camp-500 hover:text-camp-700"
                                 disabled={state.isLoading}
-                                onClick={() => openEditModal(transaction)}
+                                onClick={() => openPurchaseEditModal(transaction)}
+                                type="button"
+                              >
+                                Edit
+                              </button>
+                            ) : null}
+                            {!canEditPurchase && canEditBalanceDelta ? (
+                              <button
+                                className="rounded-full border border-gray-300 px-3 py-1 text-xs font-semibold text-gray-600 shadow-sm hover:border-camp-500 hover:text-camp-700"
+                                disabled={state.isLoading}
+                                onClick={() => openBalanceEditModal(transaction)}
                                 type="button"
                               >
                                 Edit
@@ -2172,6 +2355,16 @@ export default function POSPage() {
                                 type="button"
                               >
                                 {isDeleting ? 'Removing…' : 'Void'}
+                              </button>
+                            ) : null}
+                            {canUnvoid ? (
+                              <button
+                                className="rounded-full border border-gray-300 px-3 py-1 text-xs font-semibold text-gray-600 shadow-sm hover:border-camp-400 hover:text-camp-700"
+                                disabled={isUnvoiding || state.isLoading}
+                                onClick={() => handleUnvoidTransaction(transaction)}
+                                type="button"
+                              >
+                                {isUnvoiding ? 'Restoring…' : 'Unvoid'}
                               </button>
                             ) : null}
                           </div>
@@ -2591,6 +2784,86 @@ export default function POSPage() {
                   >
                     {editModalState.submitting ? 'Saving…' : 'Save Changes'}
                   </button>
+                </div>
+              </>
+            ) : null}
+          </Dialog.Panel>
+        </div>
+      </Dialog>
+
+      <Dialog open={balanceEditModalState.open} onClose={closeBalanceEditModal}>
+        <div className="fixed inset-0 bg-black/40" aria-hidden="true" />
+        <div className="fixed inset-0 flex items-center justify-center p-4">
+          <Dialog.Panel className="w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
+            {balanceEditModalState.transaction ? (
+              <>
+                <Dialog.Title className="text-lg font-semibold text-gray-900">
+                  Edit {balanceEditModalState.transaction.type === 'deposit' ? 'Deposit' : 'Adjustment'}
+                </Dialog.Title>
+                <Dialog.Description className="mt-1 text-sm text-gray-500">
+                  Update the amount or note for this balance change.
+                </Dialog.Description>
+
+                <div className="mt-4 space-y-4">
+                  <div>
+                    <label className="text-sm font-medium text-gray-700" htmlFor="balance-edit-amount">
+                      Amount
+                    </label>
+                    <input
+                      className="mt-2 w-full rounded-lg border border-gray-300 px-4 py-2 text-base shadow-sm focus:border-camp-500 focus:outline-none focus:ring-2 focus:ring-camp-200"
+                      disabled={balanceEditModalState.submitting}
+                      id="balance-edit-amount"
+                      inputMode="decimal"
+                      min="-1000"
+                      onChange={(event) =>
+                        setBalanceEditModalState((prev) => ({ ...prev, amount: event.target.value }))
+                      }
+                      step="0.01"
+                      type="number"
+                      value={balanceEditModalState.amount}
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-sm font-medium text-gray-700" htmlFor="balance-edit-note">
+                      Note (optional)
+                    </label>
+                    <textarea
+                      className="mt-2 w-full rounded-lg border border-gray-300 px-4 py-2 text-sm shadow-sm focus:border-camp-500 focus:outline-none focus:ring-2 focus:ring-camp-200"
+                      disabled={balanceEditModalState.submitting}
+                      id="balance-edit-note"
+                      onChange={(event) =>
+                        setBalanceEditModalState((prev) => ({ ...prev, note: event.target.value }))
+                      }
+                      rows={3}
+                      value={balanceEditModalState.note}
+                    />
+                  </div>
+
+                  {balanceEditModalState.error ? (
+                    <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                      {balanceEditModalState.error}
+                    </div>
+                  ) : null}
+
+                  <div className="flex justify-end gap-3">
+                    <button
+                      className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-600 shadow-sm hover:border-gray-400"
+                      disabled={balanceEditModalState.submitting}
+                      onClick={closeBalanceEditModal}
+                      type="button"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      className="rounded-lg bg-camp-600 px-4 py-2 text-sm font-semibold text-white shadow hover:bg-camp-700 disabled:opacity-60"
+                      disabled={balanceEditModalState.submitting}
+                      onClick={() => void handleBalanceEditSubmit()}
+                      type="button"
+                    >
+                      {balanceEditModalState.submitting ? 'Saving…' : 'Save Changes'}
+                    </button>
+                  </div>
                 </div>
               </>
             ) : null}

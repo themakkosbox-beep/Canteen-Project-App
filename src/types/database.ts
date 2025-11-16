@@ -1,3 +1,10 @@
+export interface CustomerTypeDefinition {
+  id: string;
+  label: string;
+  discount_percent: number;
+  discount_flat: number;
+}
+
 export interface Customer {
   id: number;
   customer_id: string; // 4-digit code
@@ -5,6 +12,10 @@ export interface Customer {
   balance: number;
   discount_percent?: number;
   discount_flat?: number;
+  type_id?: string | null;
+  type_label?: string | null;
+  type_discount_percent?: number;
+  type_discount_flat?: number;
   created_at: string;
   updated_at: string;
 }
@@ -80,6 +91,21 @@ export interface TransactionExportRow {
   options_json?: string | null;
   options?: TransactionOptionSelection[];
   staff_id?: string | null;
+  edit_parent_transaction_id?: string | null;
+}
+
+export interface TransactionStatsSummary {
+  totalTransactions: number;
+  totalDeposits: number;
+  totalWithdrawals: number;
+  totalPurchases: number;
+  totalAdjustments: number;
+  totalAmountDeposits: number;
+  totalAmountWithdrawals: number;
+  totalAmountPurchases: number;
+  totalAmountAdjustments: number;
+  voidedTransactions: number;
+  lastTransactionAt: string | null;
 }
 
 export interface Transaction {
@@ -98,6 +124,7 @@ export interface Transaction {
   voided_at?: string | null;
   void_note?: string | null;
   options?: TransactionOptionSelection[];
+  edit_parent_transaction_id?: string | null;
 }
 
 export interface TransactionLog extends Transaction {

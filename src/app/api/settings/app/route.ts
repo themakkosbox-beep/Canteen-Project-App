@@ -6,10 +6,22 @@ export const runtime = 'nodejs';
 const buildError = (message: string, status = 400) =>
   NextResponse.json({ error: message }, { status });
 
-export async function GET() {
+const unauthorizedResponse = () =>
+  NextResponse.json({ error: 'Admin code required', adminCodeRequired: true }, { status: 401 });
+
+export async function GET(request: NextRequest) {
   try {
     const database = DatabaseManager.getInstance();
     const settings = await database.getAppSettings();
+
+    if (settings.adminCodeSet) {
+      const headerCode = request.headers.get('x-admin-code') ?? '';
+      const verified = await database.verifyAdminAccessCode(headerCode);
+      if (!verified) {
+        return unauthorizedResponse();
+      }
+    }
+
     return NextResponse.json(settings);
   } catch (error) {
     console.error('Error loading app settings:', error);
@@ -57,7 +69,7 @@ const handleWrite = async (request: NextRequest) => {
       const candidate = typeof currentAdminCode === 'string' ? currentAdminCode : '';
       const verified = await database.verifyAdminAccessCode(candidate);
       if (!verified) {
-        return buildError('Current admin code is incorrect', 401);
+        return unauthorizedResponse();
       }
     }
 
