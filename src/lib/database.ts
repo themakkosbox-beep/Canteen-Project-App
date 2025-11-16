@@ -1881,7 +1881,8 @@ class DatabaseManager {
           t.note,
           t.voided,
           t.void_note,
-          t.options_json
+          t.options_json,
+          t.staff_id
         FROM transactions t
         LEFT JOIN customers c ON c.customer_id = t.customer_id
         LEFT JOIN products p ON p.product_id = t.product_id
@@ -1894,6 +1895,7 @@ class DatabaseManager {
         void_note: row.void_note ?? null,
         options_json: row.options_json ?? null,
         options: this.parseTransactionOptions(row.options_json ?? null),
+        staff_id: row.staff_id ?? null,
       }));
     });
   }

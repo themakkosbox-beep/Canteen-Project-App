@@ -2,6 +2,9 @@ import Link from 'next/link';
 import DatabaseManager from '@/lib/database';
 import type { TransactionExportRow } from '@/types/database';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 const formatCurrency = (value: number | null | undefined): string => {
   if (typeof value !== 'number' || Number.isNaN(value)) {
     return '—';

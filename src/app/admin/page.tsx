@@ -6,7 +6,6 @@ import type {
   Product,
   ProductOptionGroup,
   QuickKeySlot,
-  TransactionExportRow,
 } from '@/types/database';
 
 interface CustomerFormState {
@@ -65,19 +64,6 @@ const formatOptionalNumberInput = (value?: number | null): string => {
 
   const rounded = Math.round(value * 100) / 100;
   return rounded.toString();
-};
-
-const escapeCsvValue = (value: unknown): string => {
-  if (value === null || value === undefined) {
-    return '';
-  }
-
-  const stringValue = String(value);
-  if (stringValue.includes(',') || stringValue.includes('"') || stringValue.includes('\n')) {
-    return `"${stringValue.replace(/"/g, '""')}"`;
-  }
-
-  return stringValue;
 };
 
 export default function AdminPage() {
@@ -303,71 +289,23 @@ export default function AdminPage() {
     try {
       const response = await fetch('/api/transactions/export');
       if (!response.ok) {
-        const payload = await response.json().catch(() => ({}));
-        throw new Error(payload?.error ?? 'Failed to export transactions');
+        const contentType = response.headers.get('content-type') ?? '';
+        if (contentType.includes('application/json')) {
+          const payload = await response.json().catch(() => ({}));
+          throw new Error((payload as { error?: string })?.error ?? 'Failed to export transactions');
+        }
+        const fallback = await response.text().catch(() => 'Failed to export transactions');
+        throw new Error(fallback || 'Failed to export transactions');
       }
 
-      const data: unknown = await response.json();
-      const rows: TransactionExportRow[] = Array.isArray(data) ? (data as TransactionExportRow[]) : [];
-
-      const header = [
-        'Date',
-        'Time',
-        'Customer ID',
-        'Customer Name',
-        'Type',
-        'Product ID',
-        'Product Name',
-        'Product Price',
-        'Amount',
-        'Balance After',
-        'Note',
-      ];
-
-      const csvLines: string[] = [header.map(escapeCsvValue).join(',')];
-
-      rows.forEach((row) => {
-        const timestamp = new Date(row.timestamp);
-        const validDate = !Number.isNaN(timestamp.getTime());
-        const datePart = validDate ? timestamp.toISOString().slice(0, 10) : '';
-        const timePart = validDate
-          ? timestamp.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
-          : '';
-
-        const productPrice =
-          typeof row.product_price === 'number' && Number.isFinite(row.product_price)
-            ? row.product_price.toFixed(2)
-            : '';
-
-        const amount = Number.isFinite(row.amount) ? row.amount.toFixed(2) : '';
-        const balanceAfter = Number.isFinite(row.balance_after) ? row.balance_after.toFixed(2) : '';
-
-        csvLines.push(
-          [
-            datePart,
-            timePart,
-            row.customer_id,
-            row.customer_name ?? '',
-            row.type,
-            row.product_id ?? '',
-            row.product_name ?? '',
-            productPrice,
-            amount,
-            balanceAfter,
-            row.note ?? '',
-          ]
-            .map(escapeCsvValue)
-            .join(',')
-        );
-      });
-
-      const csvContent = csvLines.join('\r\n');
-      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const blob = await response.blob();
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const disposition = response.headers.get('content-disposition') ?? '';
+      const match = disposition.match(/filename="?([^";]+)"?/i);
+      const fallbackName = `transactions-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
       link.href = url;
-      link.setAttribute('download', `transactions-${timestamp}.csv`);
+      link.setAttribute('download', match?.[1] ?? fallbackName);
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);

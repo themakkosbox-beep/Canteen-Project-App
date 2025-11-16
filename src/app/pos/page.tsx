@@ -413,6 +413,7 @@ export default function POSPage() {
   const [deletingTransactionId, setDeletingTransactionId] = useState<string | null>(null);
   const [appSettings, setAppSettings] = useState<AppSettingsPayload | null>(null);
   const [appSettingsError, setAppSettingsError] = useState<string | null>(null);
+  const [exportingCsv, setExportingCsv] = useState(false);
   const [optionModalState, setOptionModalState] = useState<OptionModalState>(() =>
     createEmptyOptionModalState()
   );
@@ -745,23 +746,6 @@ export default function POSPage() {
     if (entryInputRef.current) {
       entryInputRef.current.focus();
     }
-  };
-
-  const describeTransactionOptions = (options?: TransactionOptionSelection[] | null) => {
-    if (!Array.isArray(options) || options.length === 0) {
-      return '';
-    }
-
-    return options
-      .map((group) => {
-        const labels = group.choices.map((choice) => choice.label).join(', ');
-        const deltaLabel =
-          group.delta && group.delta !== 0
-            ? ` (${group.delta > 0 ? '+' : '-'}${formatCurrency(Math.abs(group.delta))})`
-            : '';
-        return `${group.groupName}: ${labels}${deltaLabel}`;
-      })
-      .join('; ');
   };
 
   const openOptionModal = (product: Product, trigger: PurchaseTrigger) => {
@@ -1517,45 +1501,43 @@ export default function POSPage() {
     }`;
 
   const canUseQuickKeys = Boolean(state.currentCustomer);
-  const exportTransactionsToCsv = () => {
-    if (!state.recentTransactions.length) {
+  const exportTransactionsToCsv = async () => {
+    if (exportingCsv) {
       return;
     }
 
-    const rows = [
-      [
-        'Transaction ID',
-        'Type',
-        'Voided',
-        'Amount',
-        'Balance After',
-        'Timestamp',
-        'Product',
-        'Note',
-        'Staff',
-        'Options',
-      ],
-      ...state.recentTransactions.map((transaction) => [
-        transaction.transaction_id ?? '',
-        transaction.type,
-        transaction.voided ? 'Yes' : 'No',
-        formatCurrency(transaction.amount),
-        formatCurrency(transaction.balance_after),
-        new Date(transaction.timestamp).toLocaleString(),
-        transaction.product_name ?? '',
-        transaction.note ?? '',
-        transaction.staff_id ?? '',
-        describeTransactionOptions(transaction.options),
-      ]),
-    ];
+    setExportingCsv(true);
+    try {
+      const response = await fetch('/api/transactions/export');
+      if (!response.ok) {
+        const contentType = response.headers.get('content-type') ?? '';
+        if (contentType.includes('application/json')) {
+          const payload = await response.json().catch(() => ({}));
+          throw new Error((payload as { error?: string })?.error ?? 'Failed to export transactions');
+        }
+        const fallback = await response.text().catch(() => 'Failed to export transactions');
+        throw new Error(fallback || 'Failed to export transactions');
+      }
 
-    const csvContent = rows.map((row) => row.map((value) => `"${value.replace(/"/g, '""')}"`).join(',')).join('\n');
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.setAttribute('download', `transactions_${state.currentCustomer?.customer_id ?? 'export'}.csv`);
-    link.click();
-    URL.revokeObjectURL(link.href);
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      const disposition = response.headers.get('content-disposition') ?? '';
+      const match = disposition.match(/filename="?([^";]+)"?/i);
+      const fallbackName = `transactions-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
+      link.href = url;
+      link.setAttribute('download', match?.[1] ?? fallbackName);
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error(error);
+      setState((prev) => ({
+        ...prev,
+        error: error instanceof Error ? error.message : 'Failed to export transactions',
+      }));
+    } finally {
+      setExportingCsv(false);
+    }
   };
 
   const filteredQuickKeys = quickKeySlots.filter((slot) => slot.productId);
@@ -1566,7 +1548,7 @@ export default function POSPage() {
       return (
         <button
           key={slot.index}
-          className="h-24 rounded-xl border border-dashed border-gray-300 bg-white text-gray-400"
+          className="h-24 w-full rounded-xl border border-dashed border-gray-300 bg-white text-gray-400"
           type="button"
         >
           Empty
@@ -1577,11 +1559,11 @@ export default function POSPage() {
     return (
       <button
         key={slot.index}
-        className="flex h-24 flex-col justify-between rounded-xl border border-gray-200 bg-white p-3 text-left shadow hover:border-camp-500 hover:shadow-md"
+        className="flex h-24 w-full flex-col justify-between overflow-hidden rounded-xl border border-gray-200 bg-white p-3 text-left shadow hover:border-camp-500 hover:shadow-md"
         onClick={() => handleQuickKeyPurchase(slot)}
         type="button"
       >
-        <span className="font-semibold text-gray-800">{product.name}</span>
+        <span className="font-semibold text-gray-800 truncate">{product.name}</span>
         <div className="flex items-center justify-between text-sm text-gray-500">
           <span>{formatCurrency(product.price)}</span>
           {product.category ? <span className="rounded-full bg-camp-50 px-2 py-0.5 text-xs text-camp-600">{product.category}</span> : null}
@@ -1662,7 +1644,7 @@ export default function POSPage() {
           </div>
         </div>
       </header>
-      <main className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-6 px-6 py-6">
+  <main className="flex w-full flex-1 flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8">
         {appSettingsError ? (
           <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
             {appSettingsError}
@@ -1693,8 +1675,8 @@ export default function POSPage() {
           </section>
         ) : null}
 
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(520px,640px)_minmax(0,1fr)] lg:items-start">
-          <section className="rounded-xl border border-gray-200 bg-white p-6 shadow lg:col-start-1 lg:row-start-1">
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(320px,1fr)_minmax(520px,760px)] xl:grid-cols-[minmax(320px,1fr)_minmax(520px,760px)_minmax(320px,1fr)] xl:items-start">
+          <section className="rounded-xl border border-gray-200 bg-white p-6 shadow xl:col-start-1 xl:row-start-1">
             <div className="flex items-center justify-between">
               <div>
                 <h2 className="text-base font-semibold text-gray-900">Quick Keys</h2>
@@ -1722,7 +1704,7 @@ export default function POSPage() {
             </div>
           </section>
 
-          <section className="rounded-xl border border-gray-200 bg-white p-6 shadow lg:col-start-2 lg:mx-auto lg:w-full lg:max-w-2xl">
+          <section className="rounded-xl border border-gray-200 bg-white p-6 shadow lg:col-start-2 lg:row-start-1 xl:col-start-2">
               <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
                 <div className="flex flex-1 flex-col gap-3">
                   <label className="text-sm font-medium text-gray-700" htmlFor="customerId">
@@ -1869,7 +1851,7 @@ export default function POSPage() {
               )}
             </section>
 
-          <aside className="space-y-6 lg:col-start-3 lg:row-start-1">
+          <aside className="space-y-6 lg:col-span-2 lg:row-start-2 xl:col-span-1 xl:col-start-3 xl:row-start-1">
             <section className="rounded-xl border border-gray-200 bg-white p-6 shadow">
               <div className="flex items-center justify-between">
                 <div>
@@ -2086,14 +2068,17 @@ export default function POSPage() {
                   <p className="text-sm text-gray-500">Latest transactions for this customer.</p>
                 </div>
                 <button
-                  className="text-sm font-semibold text-camp-600 hover:text-camp-700"
-                  disabled={!state.recentTransactions.length}
+                  className="text-sm font-semibold text-camp-600 hover:text-camp-700 disabled:opacity-60"
+                  disabled={exportingCsv}
                   onClick={exportTransactionsToCsv}
                   type="button"
                 >
-                  Export CSV
+                  {exportingCsv ? 'Preparing CSV…' : 'Export All Transactions'}
                 </button>
               </div>
+              <p className="mt-1 text-xs text-gray-500">
+                Downloads every transaction on file, not just this customer&rsquo;s activity.
+              </p>
               {trainingMode ? (
                 <p className="mt-2 text-xs text-gray-500">
                   Editing and voiding are disabled in training mode. Switch back to live mode to manage transactions.

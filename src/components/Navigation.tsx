@@ -21,31 +21,45 @@ const DEFAULT_BRAND_PRIMARY = "Camp Canteen";
 const DEFAULT_BRAND_SECONDARY = "Point of Sale";
 const DEFAULT_BRAND_TAGLINE = "Camp Canteen POS";
 
+const resolveActiveHref = (pathname: string): string | null => {
+  let active: { href: string; score: number } | null = null;
+
+  NAV_LINKS.forEach((link) => {
+    let score = 0;
+    if (link.href === '/') {
+      score = pathname === '/' ? 1 : 0;
+    } else if (pathname === link.href) {
+      score = link.href.length + 1;
+    } else if (pathname.startsWith(`${link.href}/`)) {
+      score = link.href.length;
+    }
+
+    if (score > 0 && (!active || score > active.score)) {
+      active = { href: link.href, score };
+    }
+  });
+
+  return active?.href ?? (pathname === '/' ? '/' : null);
+};
+
 export default function Navigation({ brandName }: NavigationProps) {
   const pathname = usePathname();
 
-  const links = useMemo(
-    () =>
-      NAV_LINKS.map((link) => {
-        const isActive =
-          pathname === link.href ||
-          (link.href !== "/" && pathname.startsWith(link.href));
-
-        return {
-          ...link,
-          isActive,
-        };
-      }),
-    [pathname]
-  );
+  const links = useMemo(() => {
+    const activeHref = resolveActiveHref(pathname ?? '/');
+    return NAV_LINKS.map((link) => ({
+      ...link,
+      isActive: activeHref === link.href,
+    }));
+  }, [pathname]);
 
   const displayBrand = brandName?.trim()
     ? brandName.trim()
     : `${DEFAULT_BRAND_PRIMARY} ${DEFAULT_BRAND_SECONDARY}`;
 
   return (
-    <header className="bg-white shadow-sm">
-      <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3">
+    <header className="sticky top-0 z-40 border-b border-gray-100 bg-white/95 shadow-sm backdrop-blur">
+      <div className="mx-auto flex w-full max-w-6xl items-center justify-between px-4 py-3">
         <div className="flex items-center gap-3">
           <Image
             alt={`${brandName?.trim() ? brandName.trim() : DEFAULT_BRAND_PRIMARY} identity mark`}

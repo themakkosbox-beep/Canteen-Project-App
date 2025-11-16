@@ -79,6 +79,7 @@ export interface TransactionExportRow {
   void_note?: string | null;
   options_json?: string | null;
   options?: TransactionOptionSelection[];
+  staff_id?: string | null;
 }
 
 export interface Transaction {
