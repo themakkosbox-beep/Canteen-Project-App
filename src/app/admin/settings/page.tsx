@@ -1,6 +1,16 @@
 'use client';
 
 import React, { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  LockClosedIcon,
+  ArrowPathIcon,
+  BanknotesIcon,
+  CreditCardIcon,
+  ArrowTrendingUpIcon,
+  ArrowTrendingDownIcon,
+  NoSymbolIcon,
+  ShieldCheckIcon,
+} from '@heroicons/react/24/outline';
 import type { AppSettingsPayload, TransactionStatsSummary } from '@/types/database';
 
 interface SettingsFormState {
@@ -27,6 +37,20 @@ const formatNumberInput = (value: number | null | undefined): string => {
   }
   return (Math.round(value * 100) / 100).toString();
 };
+
+const StatsSkeleton = () => (
+  <div className="animate-pulse space-y-4">
+    <div className="grid gap-4 md:grid-cols-2">
+      <div className="h-32 rounded-lg bg-gray-200"></div>
+      <div className="h-32 rounded-lg bg-gray-200"></div>
+    </div>
+    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      {[...Array(4)].map((_, i) => (
+        <div key={i} className="h-24 rounded-lg bg-gray-200"></div>
+      ))}
+    </div>
+  </div>
+);
 
 const SettingsPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
@@ -295,35 +319,6 @@ const SettingsPage: React.FC = () => {
     }));
   };
 
-  const statsBreakdown = transactionStats
-    ? [
-        {
-          key: 'deposits',
-          label: 'Deposits',
-          count: transactionStats.totalDeposits,
-          amount: transactionStats.totalAmountDeposits,
-        },
-        {
-          key: 'withdrawals',
-          label: 'Withdrawals',
-          count: transactionStats.totalWithdrawals,
-          amount: transactionStats.totalAmountWithdrawals,
-        },
-        {
-          key: 'purchases',
-          label: 'Purchases',
-          count: transactionStats.totalPurchases,
-          amount: transactionStats.totalAmountPurchases,
-        },
-        {
-          key: 'adjustments',
-          label: 'Adjustments',
-          count: transactionStats.totalAdjustments,
-          amount: transactionStats.totalAmountAdjustments,
-        },
-      ]
-    : [];
-
   return (
     <div className="min-h-screen bg-gray-100 py-8">
       <div className="mx-auto max-w-4xl space-y-6 px-4">
@@ -347,16 +342,19 @@ const SettingsPage: React.FC = () => {
         ) : null}
 
         {requiresAdminCode && !adminSessionCode ? (
-          <section className="rounded-xl bg-white p-6 shadow space-y-4">
-            <div>
-              <h2 className="text-xl font-semibold text-gray-900">Unlock Admin Settings</h2>
-              <p className="text-sm text-gray-600">
-                These settings are protected. Enter the admin code to continue.
+          <section className="rounded-xl bg-white p-8 shadow border border-gray-100 text-center space-y-6">
+            <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-gray-100">
+              <LockClosedIcon className="h-8 w-8 text-gray-500" />
+            </div>
+            <div className="space-y-2">
+              <h2 className="text-xl font-semibold text-gray-900">Admin Access Required</h2>
+              <p className="text-gray-600 max-w-md mx-auto">
+                To view transaction statistics and manage application settings, please enter the secure admin code.
               </p>
             </div>
-            <form className="space-y-3 max-w-sm" onSubmit={handleUnlock}>
+            <form className="mx-auto max-w-xs space-y-4" onSubmit={handleUnlock}>
               <div>
-                <label className="text-sm font-medium text-gray-700" htmlFor="unlockCode">
+                <label className="sr-only" htmlFor="unlockCode">
                   Admin code
                 </label>
                 <input
@@ -364,86 +362,152 @@ const SettingsPage: React.FC = () => {
                   type="password"
                   value={unlockCode}
                   onChange={(event) => setUnlockCode(event.target.value)}
-                  className="pos-input mt-1 w-full"
-                  placeholder="Enter code"
+                  className="pos-input w-full text-center tracking-widest"
+                  placeholder="Enter Admin Code"
                   disabled={unlocking}
+                  autoFocus
                 />
               </div>
               {unlockError ? (
-                <p className="text-sm text-red-600">{unlockError}</p>
+                <p className="text-sm text-red-600 bg-red-50 py-1 px-2 rounded">{unlockError}</p>
               ) : null}
               <button
                 type="submit"
-                className="pos-button w-full md:w-auto"
+                className="pos-button w-full justify-center"
                 disabled={unlocking || unlockCode.trim().length === 0}
               >
-                {unlocking ? 'Verifying…' : 'Unlock settings'}
+                {unlocking ? 'Verifying...' : 'Unlock Dashboard'}
               </button>
             </form>
-            <p className="text-xs text-gray-500">
-              Lost the code? Check with the director or whoever manages the canteen system.
-            </p>
           </section>
         ) : (
           <>
-            <section className="rounded-xl bg-white p-6 shadow space-y-6">
-              <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+            <section className="rounded-xl bg-white p-6 shadow border border-gray-100 space-y-6">
+              <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
                 <div>
-                  <h2 className="text-xl font-semibold text-gray-900">Transaction Snapshot</h2>
-                  <p className="text-sm text-gray-600">
-                    Monitor deposits, purchases, withdrawals, and adjustments at a glance.
+                  <h2 className="text-xl font-semibold text-gray-900 flex items-center gap-2">
+                    <BanknotesIcon className="h-6 w-6 text-gray-500" />
+                    Transaction Snapshot
+                  </h2>
+                  <p className="text-sm text-gray-600 mt-1">
+                    Overview of all financial activity in the system.
                   </p>
                 </div>
-                <div className="text-sm text-gray-500">
-                  {loadingStats
-                    ? 'Refreshing totals…'
-                    : transactionStats?.lastTransactionAt
-                    ? `Last activity ${new Date(transactionStats.lastTransactionAt).toLocaleString()}`
-                    : 'No transactions recorded yet'}
+                <div className="flex items-center gap-3">
+                  <span className="text-xs text-gray-500">
+                    {transactionStats?.lastTransactionAt
+                      ? `Updated ${new Date(transactionStats.lastTransactionAt).toLocaleTimeString()}`
+                      : ''}
+                  </span>
+                  <button
+                    onClick={() => void loadTransactionStats()}
+                    disabled={loadingStats}
+                    className="rounded-full p-2 text-gray-400 hover:bg-gray-100 hover:text-gray-600 transition-colors"
+                    title="Refresh stats"
+                  >
+                    <ArrowPathIcon className={`h-5 w-5 ${loadingStats ? 'animate-spin' : ''}`} />
+                  </button>
                 </div>
               </div>
+
               {statsError ? (
-                <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 flex items-center gap-2">
+                  <NoSymbolIcon className="h-5 w-5" />
                   {statsError}
                 </div>
+              ) : loadingStats && !transactionStats ? (
+                <StatsSkeleton />
               ) : transactionStats ? (
-                <>
+                <div className="space-y-4">
                   <div className="grid gap-4 md:grid-cols-2">
-                    <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
-                      <p className="text-sm uppercase tracking-wide text-gray-500">Total Transactions</p>
-                      <p className="text-3xl font-semibold text-gray-900">
+                    <div className="rounded-xl border border-blue-100 bg-blue-50/50 p-5">
+                      <div className="flex items-center gap-3 mb-2">
+                        <div className="p-2 bg-blue-100 rounded-lg text-blue-600">
+                          <CreditCardIcon className="h-6 w-6" />
+                        </div>
+                        <p className="text-sm font-medium uppercase tracking-wide text-blue-900">Total Transactions</p>
+                      </div>
+                      <p className="text-4xl font-bold text-gray-900">
                         {transactionStats.totalTransactions.toLocaleString()}
                       </p>
-                      <p className="text-xs text-gray-500 mt-1">
-                        Includes every deposit, withdrawal, purchase, and adjustment.
+                      <p className="text-xs text-gray-500 mt-2">
+                        All recorded system activities
                       </p>
                     </div>
-                    <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
-                      <p className="text-sm uppercase tracking-wide text-gray-500">Voided Entries</p>
-                      <p className="text-3xl font-semibold text-gray-900">
+                    <div className="rounded-xl border border-gray-200 bg-gray-50/50 p-5">
+                      <div className="flex items-center gap-3 mb-2">
+                        <div className="p-2 bg-gray-200 rounded-lg text-gray-600">
+                          <NoSymbolIcon className="h-6 w-6" />
+                        </div>
+                        <p className="text-sm font-medium uppercase tracking-wide text-gray-600">Voided Entries</p>
+                      </div>
+                      <p className="text-4xl font-bold text-gray-900">
                         {transactionStats.voidedTransactions.toLocaleString()}
                       </p>
-                      <p className="text-xs text-gray-500 mt-1">Transactions flagged as voided.</p>
+                      <p className="text-xs text-gray-500 mt-2">
+                        Cancelled or reverted actions
+                      </p>
                     </div>
                   </div>
+                  
                   <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                    {statsBreakdown.map((item) => (
-                      <div key={item.key} className="rounded-lg border border-gray-200 p-4 bg-white">
-                        <p className="text-sm uppercase tracking-wide text-gray-500">{item.label}</p>
-                        <p className="text-2xl font-semibold text-gray-900">
-                          {item.count.toLocaleString()}
-                        </p>
-                        <p className="text-xs text-gray-500 mt-1">
-                          {currencyFormatter.format(item.amount)} total
-                        </p>
+                    <div className="rounded-lg border border-gray-200 p-4 bg-white hover:border-green-300 transition-colors">
+                      <div className="flex items-center justify-between mb-2">
+                        <p className="text-sm font-medium text-gray-500">Deposits</p>
+                        <ArrowTrendingUpIcon className="h-4 w-4 text-green-500" />
                       </div>
-                    ))}
+                      <p className="text-2xl font-semibold text-gray-900">
+                        {currencyFormatter.format(transactionStats.totalAmountDeposits)}
+                      </p>
+                      <p className="text-xs text-gray-400 mt-1">
+                        {transactionStats.totalDeposits.toLocaleString()} transactions
+                      </p>
+                    </div>
+
+                    <div className="rounded-lg border border-gray-200 p-4 bg-white hover:border-red-300 transition-colors">
+                      <div className="flex items-center justify-between mb-2">
+                        <p className="text-sm font-medium text-gray-500">Purchases</p>
+                        <CreditCardIcon className="h-4 w-4 text-red-500" />
+                      </div>
+                      <p className="text-2xl font-semibold text-gray-900">
+                        {currencyFormatter.format(transactionStats.totalAmountPurchases)}
+                      </p>
+                      <p className="text-xs text-gray-400 mt-1">
+                        {transactionStats.totalPurchases.toLocaleString()} transactions
+                      </p>
+                    </div>
+
+                    <div className="rounded-lg border border-gray-200 p-4 bg-white hover:border-orange-300 transition-colors">
+                      <div className="flex items-center justify-between mb-2">
+                        <p className="text-sm font-medium text-gray-500">Withdrawals</p>
+                        <ArrowTrendingDownIcon className="h-4 w-4 text-orange-500" />
+                      </div>
+                      <p className="text-2xl font-semibold text-gray-900">
+                        {currencyFormatter.format(transactionStats.totalAmountWithdrawals)}
+                      </p>
+                      <p className="text-xs text-gray-400 mt-1">
+                        {transactionStats.totalWithdrawals.toLocaleString()} transactions
+                      </p>
+                    </div>
+
+                    <div className="rounded-lg border border-gray-200 p-4 bg-white hover:border-gray-300 transition-colors">
+                      <div className="flex items-center justify-between mb-2">
+                        <p className="text-sm font-medium text-gray-500">Adjustments</p>
+                        <ShieldCheckIcon className="h-4 w-4 text-gray-500" />
+                      </div>
+                      <p className="text-2xl font-semibold text-gray-900">
+                        {currencyFormatter.format(transactionStats.totalAmountAdjustments)}
+                      </p>
+                      <p className="text-xs text-gray-400 mt-1">
+                        {transactionStats.totalAdjustments.toLocaleString()} transactions
+                      </p>
+                    </div>
                   </div>
-                </>
+                </div>
               ) : (
-                <p className="text-sm text-gray-500">
-                  {loadingStats ? 'Refreshing totals…' : 'No transactions recorded yet.'}
-                </p>
+                <div className="text-center py-12 bg-gray-50 rounded-lg border border-dashed border-gray-300">
+                  <p className="text-gray-500">No transaction data available.</p>
+                </div>
               )}
             </section>
 
