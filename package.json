@@ -5,7 +5,9 @@
   "main": "index.js",
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "gen:changelog": "node scripts/generate-changelog.js",
+    "build": "npm run gen:changelog && next build",
+    "prebuild": "npm run gen:changelog",
     "start": "next start",
     "lint": "next lint",
     "db:setup": "node scripts/setup-db.js",

@@ -1,0 +1,117 @@
+[
+  {
+    "version": "Unreleased",
+    "date": "Wed Nov 19 2025",
+    "highlights": [
+      "assets: generate multi-size app-icon.ico from SVG; add generator script"
+    ]
+  },
+  {
+    "version": "v1.3.1",
+    "date": "Wed Nov 19 2025",
+    "highlights": [
+      "desktop: ensure BrowserWindow uses explicit app icon (dev and packaged)",
+      "Bump version to 1.3.1",
+      "Bump version to 1.3.1 and update app icon",
+      "Bump version to 1.3.1 - New Tech Logo",
+      "Bump version to 1.3.1 and update logo assets"
+    ]
+  },
+  {
+    "version": "v1.3.0",
+    "date": "Tue Nov 18 2025",
+    "highlights": [
+      "Bump version to 1.3.0"
+    ]
+  },
+  {
+    "version": "v1.2.6",
+    "date": "Tue Nov 18 2025",
+    "highlights": [
+      "UI polish: Admin settings visual improvements and skeleton loading",
+      "Bump version to 1.2.6",
+      "Secure admin settings and add stats card"
+    ]
+  },
+  {
+    "version": "v1.2.5",
+    "date": "Sat Nov 15 2025",
+    "highlights": [
+      "Improve exports and UI polish for 1.2.5"
+    ]
+  },
+  {
+    "version": "v1.2.4",
+    "date": "Tue Nov 11 2025",
+    "highlights": [
+      "Fix admin settings save and bump to 1.2.4"
+    ]
+  },
+  {
+    "version": "v1.2.3",
+    "date": "Tue Nov 11 2025",
+    "highlights": [
+      "Center POS card layout and refresh desktop icon"
+    ]
+  },
+  {
+    "version": "v1.2.2",
+    "date": "Sun Nov 09 2025",
+    "highlights": [
+      "chore: release v1.2.2"
+    ]
+  },
+  {
+    "version": "v1.2.1",
+    "date": "Fri Nov 07 2025",
+    "highlights": [
+      "Bump version to 1.2.1",
+      "Add transactions page and streamline POS charging",
+      "chore: prep electron packaging"
+    ]
+  },
+  {
+    "version": "v1.2.0",
+    "date": "Thu Nov 06 2025",
+    "highlights": [
+      "release: prepare v1.2.0"
+    ]
+  },
+  {
+    "version": "v1.1.0",
+    "date": "Wed Nov 05 2025",
+    "highlights": [
+      "Add product discounts, option groups, and auto-updates",
+      "chore: remove redundant blockmap artifact",
+      "chore: align release asset names",
+      "chore: add 1.0.3 release assets"
+    ]
+  },
+  {
+    "version": "v1.0.3",
+    "date": "Tue Oct 28 2025",
+    "highlights": [
+      "chore: roll UX tweaks and release prep"
+    ]
+  },
+  {
+    "version": "v1.0.2",
+    "date": "Invalid Date",
+    "highlights": [
+      "1.0.2",
+      "added READ.me and test for Auto-update"
+    ]
+  },
+  {
+    "version": "v1.0.1",
+    "date": "Invalid Date",
+    "highlights": [
+      "1.0.1",
+      "Enable auto-updates and surface version info",
+      "Add Electron shell and API scaffolding",
+      "Add live POS clock and proprietary license",
+      "Revamp POS interface and admin filters",
+      "Initial commit"
+    ]
+  }
+]
