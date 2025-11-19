@@ -158,6 +158,14 @@ async function startNextServer() {
 }
 
 function createWindow() {
+  // Resolve an icon path that works both in development and packaged builds.
+  // When packaged, electron-builder embeds the exe icon, but providing an
+  // explicit icon for the BrowserWindow helps the taskbar and window frame
+  // display the app icon consistently across environments.
+  const iconPath = app.isPackaged
+    ? path.join(process.resourcesPath, 'app-icon.ico')
+    : path.join(__dirname, 'app-icon.ico');
+
   const mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
@@ -165,6 +173,7 @@ function createWindow() {
     minHeight: 640,
     backgroundColor: '#f7fafc',
     autoHideMenuBar: true,
+    icon: iconPath,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
