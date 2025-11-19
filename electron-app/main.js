@@ -13,6 +13,7 @@ const NEXT_HOST = process.env.NEXT_HOST ?? '127.0.0.1';
 const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 let nextProcess;
 let dataDirectory = null;
+let isQuitting = false;
 
 function applyApplicationMenu(_mainWindow, options = {}) {
   const {
@@ -138,7 +139,7 @@ async function startNextServer() {
   }
 
   nextProcess.on('exit', (code) => {
-    if (code !== 0) {
+    if (!isQuitting && code !== 0) {
       const message = `Next.js process exited with code ${code ?? 'unknown'}`;
       console.error(message);
       dialog.showErrorBox('Server Error', message);
@@ -417,6 +418,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  isQuitting = true;
   if (nextProcess && !nextProcess.killed) {
     nextProcess.kill();
   }
