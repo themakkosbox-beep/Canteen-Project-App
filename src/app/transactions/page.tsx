@@ -7,8 +7,7 @@ export const revalidate = 0;
 
 export default async function RecentTransactionsPage() {
   const database = DatabaseManager.getInstance();
-  const allTransactions = await database.listAllTransactions();
-  const recent = allTransactions.slice(0, 50);
+  const recent = await database.listAllTransactions(50);
 
   return (
     <div className="min-h-screen bg-gray-100 py-8">

@@ -8,6 +8,8 @@ dist/
 electron-app/node_modules/
 electron-app/dist/
 backups/
+!src/app/api/backups/
+!src/app/api/backups/**
 /Camp Canteen POS/
 /chrome_*.pak
 /resources/

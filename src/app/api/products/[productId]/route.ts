@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import DatabaseManager from '@/lib/database';
 import { serializeProduct } from '../serializer';
+import { requireAdminAccess } from '@/lib/admin-auth';
 
 export const runtime = 'nodejs';
 
@@ -36,6 +37,11 @@ export async function PUT(
   { params }: { params: { productId: string } }
 ) {
   try {
+    const auth = await requireAdminAccess(request);
+    if (auth) {
+      return auth;
+    }
+
     const { productId } = params;
     if (!productId) {
       return NextResponse.json({ error: 'Product ID is required' }, { status: 400 });

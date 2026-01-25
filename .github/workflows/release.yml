@@ -1,0 +1,63 @@
+name: Build and Publish Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build-and-publish:
+    name: Build (Windows) and Publish
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install root dependencies
+        run: npm ci
+        shell: bash
+
+      - name: Generate changelog
+        run: npm run gen:changelog
+        shell: bash
+
+      - name: Generate release notes
+        run: node scripts/generate-release-notes.js
+        shell: bash
+
+      - name: Read release notes
+        id: read_notes
+        run: |
+          echo "body<<EOF" >> $GITHUB_OUTPUT
+          cat release-notes.md >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+        shell: bash
+
+      - name: Create GitHub Release
+        uses: actions/create-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          release_name: ${{ github.ref_name }}
+          body: ${{ steps.read_notes.outputs.body }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & publish Electron (Windows)
+        run: |
+          cd electron-app
+          npm ci
+          npm run gen:icon || true
+          npx electron-builder --win nsis --x64 --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash

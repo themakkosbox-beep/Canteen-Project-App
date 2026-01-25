@@ -9,9 +9,10 @@ export async function POST(request: NextRequest) {
   const body = await request.json();
   const { customerId, barcode, productId, note, selectedOptions } = body;
 
-    if (!customerId || (typeof customerId !== 'string' || customerId.trim().length === 0)) {
+    const normalizedCustomerId = typeof customerId === 'string' ? customerId.trim() : '';
+    if (!/^\d{4}$/.test(normalizedCustomerId)) {
       return NextResponse.json(
-        { error: 'Customer ID is required' },
+        { error: 'Customer ID must be exactly 4 digits' },
         { status: 400 }
       );
     }
@@ -25,8 +26,6 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       );
     }
-
-    const normalizedCustomerId = customerId.trim();
 
     const database = DatabaseManager.getInstance();
     const normalizedSelectedOptions = Array.isArray(selectedOptions)

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import DatabaseManager from '@/lib/database';
 import { serializeProduct } from './serializer';
+import { requireAdminAccess } from '@/lib/admin-auth';
 
 export const runtime = 'nodejs';
 
@@ -10,11 +11,13 @@ export async function GET(request: NextRequest) {
     const includeInactive = searchParams.get('includeInactive') === 'true';
     const limitParam = searchParams.get('limit');
     const limit = limitParam ? Number.parseInt(limitParam, 10) : undefined;
+    const offsetParam = searchParams.get('offset');
+    const offset = offsetParam ? Number.parseInt(offsetParam, 10) : 0;
     const search = searchParams.get('search') ?? undefined;
     const category = searchParams.get('category') ?? undefined;
 
     const database = DatabaseManager.getInstance();
-    const products = await database.listProducts(includeInactive, limit ?? 100, search, category);
+    const products = await database.listProducts(includeInactive, limit ?? 100, search, category, offset);
 
     return NextResponse.json(products.map(serializeProduct));
   } catch (error) {
@@ -28,6 +31,11 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
+    const auth = await requireAdminAccess(request);
+    if (auth) {
+      return auth;
+    }
+
     const {
       productId,
       name,
@@ -108,6 +116,11 @@ export async function POST(request: NextRequest) {
 
 export async function DELETE(request: NextRequest) {
   try {
+    const auth = await requireAdminAccess(request);
+    if (auth) {
+      return auth;
+    }
+
     const body = await request.json();
     const productIds: unknown = body?.productIds ?? body?.ids;
 
@@ -133,6 +146,11 @@ export async function DELETE(request: NextRequest) {
 
 export async function PATCH(request: NextRequest) {
   try {
+    const auth = await requireAdminAccess(request);
+    if (auth) {
+      return auth;
+    }
+
     const body = await request.json();
     const productIds: unknown = body?.productIds ?? body?.ids;
     const active = body?.active;

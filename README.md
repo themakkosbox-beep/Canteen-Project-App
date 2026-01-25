@@ -6,6 +6,8 @@ Camp Canteen POS is a Next.js + Electron application for managing prepaid cantee
 
 - Customer lookup, quick keys, barcode scanning, deposits, adjustments, receipts
 - Admin dashboard for importing/exporting customers and products
+- Manual backup and restore tools with local data directory visibility
+- Admin access code gating for sensitive operations like exports and settings
 - SQLite-backed data layer powered by `sql.js`
 - Windows desktop wrapper with auto-updates via GitHub releases
 - Offline-friendly workflow using Electron and internal APIs
@@ -40,6 +42,13 @@ npm install
 npm run dev
 ```
 
+## POS Shortcuts
+
+- Ctrl+Shift+1: focus Customer ID
+- Ctrl+Shift+2: focus Scan/Search
+- Ctrl+Shift+3: focus Deposit amount
+- Ctrl+Shift+4: open Adjustment and focus amount
+
 ## Production Build (Web)
 
 ```bash
@@ -68,7 +77,7 @@ npm run start
 
 ### 4. Package and Publish the Desktop Build
 
-- Ensure `GH_TOKEN` is set in the shell (`$env:GH_TOKEN = 'github_pat_…'`).
+- Ensure `GH_TOKEN` is set in the shell (`$env:GH_TOKEN = 'github_pat_...'`).
 - Clean stale build artifacts when necessary: `Remove-Item -Recurse -Force .next`.
 - Package and publish the Electron bundle:
    ```bash
@@ -84,12 +93,14 @@ npm run start
 
 ## Environment Variables
 
-- `NEXT_PUBLIC_APP_VERSION` – exposed in the UI for the footer badge (defaults to package version).
-- `GH_TOKEN` – required by `electron-builder` to upload releases to GitHub.
+- `NEXT_PUBLIC_APP_VERSION` - exposed in the UI for the footer badge (defaults to package version).
+- `CANTEEN_DATA_DIR` - override the directory used to store `canteen.db` and backups.
+- `CANTEEN_ADMIN_PEPPER` - optional pepper for admin code hashing (recommended for deployments).
+- `GH_TOKEN` - required by `electron-builder` to upload releases to GitHub.
 
 ## Database Notes
 
-The app uses `sql.js` with an embedded SQLite file stored as `canteen.db`. In production builds the database is persisted alongside the Electron bundle.
+The app uses `sql.js` with a SQLite file stored as `canteen.db`. By default this lives in `CANTEEN_DATA_DIR` (Electron sets it to the app `userData/data` directory). Automatic backups are stored under `backups/`, and manual backup/restore tools are available in Admin Settings.
 
 ## License
 

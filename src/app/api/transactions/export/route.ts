@@ -1,6 +1,7 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import DatabaseManager from '@/lib/database';
 import type { TransactionExportRow, TransactionOptionSelection } from '@/types/database';
+import { requireAdminAccess } from '@/lib/admin-auth';
 
 export const runtime = 'nodejs';
 
@@ -79,8 +80,13 @@ const buildCsv = (rows: TransactionExportRow[]): string => {
   return lines.join('\r\n');
 };
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
+    const auth = await requireAdminAccess(request);
+    if (auth) {
+      return auth;
+    }
+
     const database = DatabaseManager.getInstance();
     const transactions = await database.listAllTransactions();
     const csv = buildCsv(transactions);

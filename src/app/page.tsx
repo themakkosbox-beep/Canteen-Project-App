@@ -72,8 +72,11 @@ export default function HomePage() {
               ))}
             </ul>
             <div className="mt-6 text-sm text-gray-500">
-              <a href="https://github.com/themakkosbox-beep/Canteen-Project-App/releases/tag/v1.3.1" className="text-camp-600 hover:underline">
-                Download desktop v1.3.1
+              <a
+                href="https://github.com/themakkosbox-beep/Canteen-Project-App/releases/latest"
+                className="text-camp-600 hover:underline"
+              >
+                Download desktop (latest)
               </a>
             </div>
           </section>

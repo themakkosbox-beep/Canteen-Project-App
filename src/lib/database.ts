@@ -15,6 +15,8 @@ import {
   TransactionStatsSummary,
   AppSettingsPayload,
   CustomerTypeDefinition,
+  BackupStatus,
+  BackupResult,
 } from '@/types/database';
 
 const QUICK_KEY_SETTING_KEY = 'quick_keys';
@@ -28,7 +30,13 @@ const APP_BRAND_NAME_KEY = 'app_brand_name';
 const APP_ADMIN_CODE_KEY = 'app_admin_code';
 const APP_GLOBAL_DISCOUNT_PERCENT_KEY = 'app_global_discount_percent';
 const APP_GLOBAL_DISCOUNT_FLAT_KEY = 'app_global_discount_flat';
+const APP_SCHEMA_VERSION_KEY = 'app_schema_version';
 const CUSTOMER_TYPES_SETTING_KEY = 'customer_types_v1';
+const SCHEMA_VERSION = 2;
+const ADMIN_CODE_HASH_ITERATIONS = 120000;
+const ADMIN_CODE_HASH_SALT_BYTES = 16;
+const ADMIN_CODE_HASH_DIGEST = 'sha256';
+const TRANSACTION_STATS_CACHE_TTL_MS = 30 * 1000;
 
 const DEFAULT_CUSTOMER_TYPES: CustomerTypeDefinition[] = [
   { id: 'camper', label: 'Camper', discount_percent: 0, discount_flat: 0 },
@@ -36,8 +44,50 @@ const DEFAULT_CUSTOMER_TYPES: CustomerTypeDefinition[] = [
   { id: 'guest', label: 'Guest', discount_percent: 0, discount_flat: 0 },
 ];
 
-const hashAdminCode = (code: string): string =>
+const getAdminCodePepper = (): string => process.env.CANTEEN_ADMIN_PEPPER ?? '';
+
+const hashAdminCodeLegacy = (code: string): string =>
   `sha256:${crypto.createHash('sha256').update(code).digest('hex')}`;
+
+const hashAdminCode = (code: string, salt?: Buffer): string => {
+  const normalized = code.trim();
+  const pepper = getAdminCodePepper();
+  const saltBuffer = salt ?? crypto.randomBytes(ADMIN_CODE_HASH_SALT_BYTES);
+  const derived = crypto.pbkdf2Sync(
+    `${normalized}${pepper}`,
+    saltBuffer,
+    ADMIN_CODE_HASH_ITERATIONS,
+    32,
+    ADMIN_CODE_HASH_DIGEST
+  );
+  return `pbkdf2:${ADMIN_CODE_HASH_ITERATIONS}:${saltBuffer.toString('hex')}:${derived.toString('hex')}`;
+};
+
+const parsePbkdf2Hash = (
+  storedHash: string
+): { iterations: number; salt: Buffer; hash: Buffer } | null => {
+  const parts = storedHash.split(':');
+  if (parts.length !== 4 || parts[0] !== 'pbkdf2') {
+    return null;
+  }
+
+  const iterations = Number.parseInt(parts[1], 10);
+  if (!Number.isFinite(iterations) || iterations <= 0) {
+    return null;
+  }
+
+  const saltHex = parts[2];
+  const hashHex = parts[3];
+  if (!saltHex || !hashHex) {
+    return null;
+  }
+
+  return {
+    iterations,
+    salt: Buffer.from(saltHex, 'hex'),
+    hash: Buffer.from(hashHex, 'hex'),
+  };
+};
 
 const sanitizeBrandName = (value: string | null | undefined): string | null => {
   if (typeof value !== 'string') {
@@ -102,8 +152,26 @@ const doesAdminCodeMatch = (storedHash: string | null, candidate: string): boole
   if (!storedHash || !candidate) {
     return false;
   }
-  const normalized = storedHash.startsWith('sha256:') ? storedHash : hashAdminCode(storedHash);
-  const candidateHash = hashAdminCode(candidate);
+
+  const trimmedHash = storedHash.trim();
+  const pbkdf2 = parsePbkdf2Hash(trimmedHash);
+  if (pbkdf2) {
+    const pepper = getAdminCodePepper();
+    const candidateHash = crypto.pbkdf2Sync(
+      `${candidate.trim()}${pepper}`,
+      pbkdf2.salt,
+      pbkdf2.iterations,
+      pbkdf2.hash.length,
+      ADMIN_CODE_HASH_DIGEST
+    );
+    if (candidateHash.length !== pbkdf2.hash.length) {
+      return false;
+    }
+    return crypto.timingSafeEqual(candidateHash, pbkdf2.hash);
+  }
+
+  const normalized = trimmedHash.startsWith('sha256:') ? trimmedHash : hashAdminCodeLegacy(trimmedHash);
+  const candidateHash = hashAdminCodeLegacy(candidate.trim());
   const storedBuffer = Buffer.from(normalized, 'utf8');
   const candidateBuffer = Buffer.from(candidateHash, 'utf8');
   if (storedBuffer.length !== candidateBuffer.length) {
@@ -111,6 +179,9 @@ const doesAdminCodeMatch = (storedHash: string | null, candidate: string): boole
   }
   return crypto.timingSafeEqual(storedBuffer, candidateBuffer);
 };
+
+const shouldUpgradeAdminHash = (storedHash: string): boolean =>
+  !storedHash.trim().startsWith('pbkdf2:');
 
 export interface BulkCustomerInput {
   customerId: string;
@@ -146,6 +217,11 @@ class DatabaseManager {
   private static backupSchedulerHandle: NodeJS.Timeout | null = null;
   private static backupInProgress = false;
   private static lastBackupTimestamp: number | null = null;
+  private static lastBackupFileName: string | null = null;
+  private static lastRestoreTimestamp: number | null = null;
+  private static transactionStatsCache: { value: TransactionStatsSummary; cachedAt: number } | null = null;
+  private operationQueue: Promise<void> = Promise.resolve();
+  private readonly dataRoot: string;
   private readonly dbPath: string;
   private readonly backupDir: string;
   private readonly backupMetaPath: string;
@@ -160,6 +236,7 @@ class DatabaseManager {
     } catch (error) {
       console.warn('Failed to ensure data directory', error);
     }
+    this.dataRoot = dataRoot;
     this.dbPath = path.join(dataRoot, 'canteen.db');
     this.backupDir = path.join(dataRoot, BACKUP_FOLDER_NAME);
     this.backupMetaPath = path.join(this.backupDir, BACKUP_META_FILE_NAME);
@@ -235,6 +312,15 @@ class DatabaseManager {
           DatabaseManager.lastBackupTimestamp = timestamp;
         }
       }
+      if (parsed && typeof parsed.lastBackupFile === 'string') {
+        DatabaseManager.lastBackupFileName = parsed.lastBackupFile;
+      }
+      if (parsed && typeof parsed.lastRestoreAt === 'string') {
+        const timestamp = Date.parse(parsed.lastRestoreAt);
+        if (!Number.isNaN(timestamp)) {
+          DatabaseManager.lastRestoreTimestamp = timestamp;
+        }
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
         console.warn('Failed to read backup metadata', error);
@@ -242,9 +328,26 @@ class DatabaseManager {
     }
   }
 
-  private writeBackupMetadata(timestamp: Date): void {
+  private writeBackupMetadata(options: {
+    lastBackupAt?: Date | null;
+    lastBackupFile?: string | null;
+    lastRestoreAt?: Date | null;
+  }): void {
     const payload = {
-      lastBackupAt: timestamp.toISOString(),
+      lastBackupAt: options.lastBackupAt
+        ? options.lastBackupAt.toISOString()
+        : DatabaseManager.lastBackupTimestamp
+        ? new Date(DatabaseManager.lastBackupTimestamp).toISOString()
+        : null,
+      lastBackupFile:
+        options.lastBackupFile ??
+        DatabaseManager.lastBackupFileName ??
+        null,
+      lastRestoreAt: options.lastRestoreAt
+        ? options.lastRestoreAt.toISOString()
+        : DatabaseManager.lastRestoreTimestamp
+        ? new Date(DatabaseManager.lastRestoreTimestamp).toISOString()
+        : null,
     };
 
     try {
@@ -276,13 +379,104 @@ class DatabaseManager {
       await this.backup(destination);
 
       DatabaseManager.lastBackupTimestamp = timestamp.getTime();
-      this.writeBackupMetadata(timestamp);
+      DatabaseManager.lastBackupFileName = fileName;
+      this.writeBackupMetadata({ lastBackupAt: timestamp, lastBackupFile: fileName });
       this.enforceBackupRetention();
     } catch (error) {
       console.error('Automatic database backup failed', error);
     } finally {
       DatabaseManager.backupInProgress = false;
     }
+  }
+
+  public async getBackupStatus(): Promise<BackupStatus> {
+    return {
+      dataDirectory: this.dataRoot,
+      dbPath: this.dbPath,
+      backupDirectory: this.backupDir,
+      lastBackupAt: DatabaseManager.lastBackupTimestamp
+        ? new Date(DatabaseManager.lastBackupTimestamp).toISOString()
+        : null,
+      lastBackupFile: DatabaseManager.lastBackupFileName,
+      lastRestoreAt: DatabaseManager.lastRestoreTimestamp
+        ? new Date(DatabaseManager.lastRestoreTimestamp).toISOString()
+        : null,
+    };
+  }
+
+  public async createBackup(): Promise<BackupResult> {
+    if (DatabaseManager.backupInProgress) {
+      throw new Error('Backup already in progress');
+    }
+
+    DatabaseManager.backupInProgress = true;
+    try {
+      const timestamp = new Date();
+      const fileName = `canteen-${this.formatBackupTimestamp(timestamp)}.db`;
+      const destination = path.join(this.backupDir, fileName);
+
+      fs.mkdirSync(this.backupDir, { recursive: true });
+      await this.backup(destination);
+
+      const stats = fs.statSync(destination);
+      DatabaseManager.lastBackupTimestamp = timestamp.getTime();
+      DatabaseManager.lastBackupFileName = fileName;
+      this.writeBackupMetadata({ lastBackupAt: timestamp, lastBackupFile: fileName });
+      this.enforceBackupRetention();
+
+      return {
+        fileName,
+        createdAt: timestamp.toISOString(),
+        size: stats.size,
+      };
+    } finally {
+      DatabaseManager.backupInProgress = false;
+    }
+  }
+
+  public async restoreBackupFromPath(backupPath: string): Promise<void> {
+    if (!backupPath || backupPath.trim().length === 0) {
+      throw new Error('Backup path is required');
+    }
+
+    const resolvedPath = path.resolve(backupPath);
+    if (!fs.existsSync(resolvedPath)) {
+      throw new Error('Backup file not found');
+    }
+
+    if (DatabaseManager.backupInProgress) {
+      throw new Error('Backup already in progress');
+    }
+
+    await this.queueOperation(async () => {
+      DatabaseManager.backupInProgress = true;
+      try {
+        fs.mkdirSync(this.backupDir, { recursive: true });
+        const timestamp = new Date();
+        const preRestoreName = `pre-restore-${this.formatBackupTimestamp(timestamp)}.db`;
+        const preRestorePath = path.join(this.backupDir, preRestoreName);
+
+        if (fs.existsSync(this.dbPath)) {
+          fs.copyFileSync(this.dbPath, preRestorePath);
+        }
+
+        const tempPath = `${this.dbPath}.restore`;
+        fs.copyFileSync(resolvedPath, tempPath);
+        fs.renameSync(tempPath, this.dbPath);
+
+        DatabaseManager.lastBackupTimestamp = timestamp.getTime();
+        DatabaseManager.lastBackupFileName = preRestoreName;
+        DatabaseManager.lastRestoreTimestamp = timestamp.getTime();
+        this.writeBackupMetadata({
+          lastBackupAt: timestamp,
+          lastBackupFile: preRestoreName,
+          lastRestoreAt: timestamp,
+        });
+        this.invalidateTransactionStatsCache();
+      } finally {
+        DatabaseManager.backupInProgress = false;
+      }
+    });
   }
 
   private enforceBackupRetention(): void {
@@ -335,39 +529,61 @@ class DatabaseManager {
     return `${year}${month}${day}-${hours}${minutes}${seconds}`;
   }
 
+  private async queueOperation<T>(fn: () => Promise<T>): Promise<T> {
+    const previous = this.operationQueue;
+    let release: (() => void) | null = null;
+    const next = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    this.operationQueue = previous.then(
+      () => next,
+      () => next
+    );
+
+    await previous;
+    try {
+      return await fn();
+    } finally {
+      release?.();
+    }
+  }
+
   private async withDatabase<T>(
     fn: (db: SqlJsDatabase) => T | Promise<T>,
     persist: boolean = false
   ): Promise<T> {
-    const SQL = await this.sqlPromise;
-    const dbExists = fs.existsSync(this.dbPath);
-    const database = dbExists
-      ? new SQL.Database(fs.readFileSync(this.dbPath))
-      : new SQL.Database();
+    return this.queueOperation(async () => {
+      const SQL = await this.sqlPromise;
+      const dbExists = fs.existsSync(this.dbPath);
+      const database = dbExists
+        ? new SQL.Database(fs.readFileSync(this.dbPath))
+        : new SQL.Database();
 
-    database.run('PRAGMA foreign_keys = ON;');
-    this.ensureSchema(database);
+      database.run('PRAGMA foreign_keys = ON;');
+      this.ensureSchema(database);
 
-    try {
-      const result = await fn(database);
-      if (persist || !dbExists) {
-        this.persist(database);
+      try {
+        const result = await fn(database);
+        if (persist || !dbExists) {
+          this.persist(database);
+        }
+        return result;
+      } finally {
+        database.close();
       }
-      return result;
-    } finally {
-      database.close();
-    }
+    });
   }
 
   private ensureSchema(db: SqlJsDatabase): void {
     db.run(`
       CREATE TABLE IF NOT EXISTS customers (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        customer_id TEXT UNIQUE NOT NULL,
+        customer_id TEXT UNIQUE NOT NULL CHECK (customer_id GLOB '[0-9][0-9][0-9][0-9]'),
         name TEXT,
-        balance REAL NOT NULL DEFAULT 0,
-        discount_percent REAL DEFAULT 0,
-        discount_flat REAL DEFAULT 0,
+        balance REAL NOT NULL DEFAULT 0 CHECK (abs(round(balance * 100) - balance * 100) < 0.00001),
+        discount_percent REAL DEFAULT 0 CHECK (discount_percent >= 0 AND discount_percent <= 100),
+        discount_flat REAL DEFAULT 0 CHECK (discount_flat >= 0),
         type_id TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -376,11 +592,13 @@ class DatabaseManager {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         product_id TEXT UNIQUE NOT NULL,
         name TEXT NOT NULL,
-        price REAL NOT NULL,
+        price REAL NOT NULL CHECK (price >= 0 AND abs(round(price * 100) - price * 100) < 0.00001),
         barcode TEXT UNIQUE,
         category TEXT,
         active BOOLEAN DEFAULT 1,
         options_json TEXT,
+        discount_percent REAL DEFAULT 0 CHECK (discount_percent >= 0 AND discount_percent <= 100),
+        discount_flat REAL DEFAULT 0 CHECK (discount_flat >= 0),
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
       );
@@ -390,8 +608,10 @@ class DatabaseManager {
         customer_id TEXT NOT NULL,
         type TEXT NOT NULL CHECK (type IN ('purchase', 'deposit', 'withdrawal', 'adjustment')),
         product_id TEXT,
-        amount REAL NOT NULL,
-        balance_after REAL NOT NULL,
+        product_name TEXT,
+        product_price REAL CHECK (product_price IS NULL OR (product_price >= 0 AND abs(round(product_price * 100) - product_price * 100) < 0.00001)),
+        amount REAL NOT NULL CHECK (abs(round(amount * 100) - amount * 100) < 0.00001),
+        balance_after REAL NOT NULL CHECK (abs(round(balance_after * 100) - balance_after * 100) < 0.00001),
         note TEXT,
         options_json TEXT,
         voided BOOLEAN DEFAULT 0,
@@ -403,10 +623,6 @@ class DatabaseManager {
         FOREIGN KEY (customer_id) REFERENCES customers (customer_id),
         FOREIGN KEY (product_id) REFERENCES products (product_id)
       );
-      CREATE INDEX IF NOT EXISTS idx_customer_id ON customers (customer_id);
-      CREATE INDEX IF NOT EXISTS idx_product_barcode ON products (barcode);
-      CREATE INDEX IF NOT EXISTS idx_transaction_customer ON transactions (customer_id);
-      CREATE INDEX IF NOT EXISTS idx_transaction_timestamp ON transactions (timestamp);
       CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
         value TEXT,
@@ -420,11 +636,17 @@ class DatabaseManager {
     this.ensureColumn(db, 'customers', 'discount_percent', 'REAL DEFAULT 0');
     this.ensureColumn(db, 'customers', 'discount_flat', 'REAL DEFAULT 0');
     this.ensureColumn(db, 'customers', 'type_id', 'TEXT');
+    this.ensureColumn(db, 'transactions', 'product_name', 'TEXT');
+    this.ensureColumn(db, 'transactions', 'product_price', 'REAL');
     this.ensureColumn(db, 'transactions', 'options_json', 'TEXT');
     this.ensureColumn(db, 'transactions', 'voided', 'BOOLEAN DEFAULT 0');
     this.ensureColumn(db, 'transactions', 'voided_at', 'DATETIME');
     this.ensureColumn(db, 'transactions', 'void_note', 'TEXT');
     this.ensureColumn(db, 'transactions', 'edit_parent_transaction_id', 'TEXT');
+
+    this.ensureIndexes(db);
+    this.ensureValidationTriggers(db);
+    this.ensureSchemaVersion(db);
   }
 
   private readSetting(db: SqlJsDatabase, key: string): string | null {
@@ -581,7 +803,13 @@ class DatabaseManager {
     if (!stored) {
       return true;
     }
-    return doesAdminCodeMatch(stored, candidate);
+    const verified = doesAdminCodeMatch(stored, candidate);
+    if (verified && shouldUpgradeAdminHash(stored)) {
+      await this.withDatabase((db) => {
+        this.writeSetting(db, APP_ADMIN_CODE_KEY, hashAdminCode(candidate));
+      }, true);
+    }
+    return verified;
   }
 
   public async updateAppSettings(options: {
@@ -647,7 +875,15 @@ class DatabaseManager {
 
   private persist(db: SqlJsDatabase): void {
     const data = db.export();
-    fs.writeFileSync(this.dbPath, Buffer.from(data));
+    const tempPath = `${this.dbPath}.tmp`;
+    fs.writeFileSync(tempPath, Buffer.from(data));
+    try {
+      fs.renameSync(tempPath, this.dbPath);
+    } catch (error) {
+      console.warn('Atomic database rename failed, falling back to copy.', error);
+      fs.copyFileSync(tempPath, this.dbPath);
+      fs.unlinkSync(tempPath);
+    }
   }
 
   private ensureColumn(
@@ -661,6 +897,152 @@ class DatabaseManager {
     if (!columns.includes(column)) {
       db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
     }
+  }
+
+  private ensureIndexes(db: SqlJsDatabase): void {
+    db.run(`
+      CREATE INDEX IF NOT EXISTS idx_customer_id ON customers (customer_id);
+      CREATE INDEX IF NOT EXISTS idx_product_barcode ON products (barcode);
+      CREATE INDEX IF NOT EXISTS idx_product_category ON products (category);
+      CREATE INDEX IF NOT EXISTS idx_product_active ON products (active);
+      CREATE INDEX IF NOT EXISTS idx_transaction_customer ON transactions (customer_id);
+      CREATE INDEX IF NOT EXISTS idx_transaction_timestamp ON transactions (timestamp);
+      CREATE INDEX IF NOT EXISTS idx_transaction_id ON transactions (transaction_id);
+    `);
+  }
+
+  private ensureValidationTriggers(db: SqlJsDatabase): void {
+    db.run(`
+      CREATE TRIGGER IF NOT EXISTS validate_customers_insert
+      BEFORE INSERT ON customers
+      BEGIN
+        SELECT CASE
+          WHEN NEW.customer_id IS NULL OR NEW.customer_id NOT GLOB '[0-9][0-9][0-9][0-9]'
+          THEN RAISE(ABORT, 'customer_id must be 4 digits')
+        END;
+        SELECT CASE
+          WHEN NEW.discount_percent IS NOT NULL AND (NEW.discount_percent < 0 OR NEW.discount_percent > 100)
+          THEN RAISE(ABORT, 'discount_percent out of range')
+        END;
+        SELECT CASE
+          WHEN NEW.discount_flat IS NOT NULL AND NEW.discount_flat < 0
+          THEN RAISE(ABORT, 'discount_flat must be >= 0')
+        END;
+        SELECT CASE
+          WHEN NEW.balance IS NOT NULL AND abs(round(NEW.balance * 100) - NEW.balance * 100) > 0.0001
+          THEN RAISE(ABORT, 'balance must have at most 2 decimals')
+        END;
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS validate_customers_update
+      BEFORE UPDATE ON customers
+      BEGIN
+        SELECT CASE
+          WHEN NEW.customer_id IS NULL OR NEW.customer_id NOT GLOB '[0-9][0-9][0-9][0-9]'
+          THEN RAISE(ABORT, 'customer_id must be 4 digits')
+        END;
+        SELECT CASE
+          WHEN NEW.discount_percent IS NOT NULL AND (NEW.discount_percent < 0 OR NEW.discount_percent > 100)
+          THEN RAISE(ABORT, 'discount_percent out of range')
+        END;
+        SELECT CASE
+          WHEN NEW.discount_flat IS NOT NULL AND NEW.discount_flat < 0
+          THEN RAISE(ABORT, 'discount_flat must be >= 0')
+        END;
+        SELECT CASE
+          WHEN NEW.balance IS NOT NULL AND abs(round(NEW.balance * 100) - NEW.balance * 100) > 0.0001
+          THEN RAISE(ABORT, 'balance must have at most 2 decimals')
+        END;
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS validate_products_insert
+      BEFORE INSERT ON products
+      BEGIN
+        SELECT CASE
+          WHEN NEW.price IS NULL OR NEW.price < 0
+          THEN RAISE(ABORT, 'price must be >= 0')
+        END;
+        SELECT CASE
+          WHEN NEW.price IS NOT NULL AND abs(round(NEW.price * 100) - NEW.price * 100) > 0.0001
+          THEN RAISE(ABORT, 'price must have at most 2 decimals')
+        END;
+        SELECT CASE
+          WHEN NEW.discount_percent IS NOT NULL AND (NEW.discount_percent < 0 OR NEW.discount_percent > 100)
+          THEN RAISE(ABORT, 'discount_percent out of range')
+        END;
+        SELECT CASE
+          WHEN NEW.discount_flat IS NOT NULL AND NEW.discount_flat < 0
+          THEN RAISE(ABORT, 'discount_flat must be >= 0')
+        END;
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS validate_products_update
+      BEFORE UPDATE ON products
+      BEGIN
+        SELECT CASE
+          WHEN NEW.price IS NULL OR NEW.price < 0
+          THEN RAISE(ABORT, 'price must be >= 0')
+        END;
+        SELECT CASE
+          WHEN NEW.price IS NOT NULL AND abs(round(NEW.price * 100) - NEW.price * 100) > 0.0001
+          THEN RAISE(ABORT, 'price must have at most 2 decimals')
+        END;
+        SELECT CASE
+          WHEN NEW.discount_percent IS NOT NULL AND (NEW.discount_percent < 0 OR NEW.discount_percent > 100)
+          THEN RAISE(ABORT, 'discount_percent out of range')
+        END;
+        SELECT CASE
+          WHEN NEW.discount_flat IS NOT NULL AND NEW.discount_flat < 0
+          THEN RAISE(ABORT, 'discount_flat must be >= 0')
+        END;
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS validate_transactions_insert
+      BEFORE INSERT ON transactions
+      BEGIN
+        SELECT CASE
+          WHEN NEW.amount IS NULL OR abs(round(NEW.amount * 100) - NEW.amount * 100) > 0.0001
+          THEN RAISE(ABORT, 'amount must have at most 2 decimals')
+        END;
+        SELECT CASE
+          WHEN NEW.balance_after IS NULL OR abs(round(NEW.balance_after * 100) - NEW.balance_after * 100) > 0.0001
+          THEN RAISE(ABORT, 'balance_after must have at most 2 decimals')
+        END;
+        SELECT CASE
+          WHEN NEW.product_price IS NOT NULL AND (NEW.product_price < 0 OR abs(round(NEW.product_price * 100) - NEW.product_price * 100) > 0.0001)
+          THEN RAISE(ABORT, 'product_price must be >= 0 with 2 decimals')
+        END;
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS validate_transactions_update
+      BEFORE UPDATE ON transactions
+      BEGIN
+        SELECT CASE
+          WHEN NEW.amount IS NULL OR abs(round(NEW.amount * 100) - NEW.amount * 100) > 0.0001
+          THEN RAISE(ABORT, 'amount must have at most 2 decimals')
+        END;
+        SELECT CASE
+          WHEN NEW.balance_after IS NULL OR abs(round(NEW.balance_after * 100) - NEW.balance_after * 100) > 0.0001
+          THEN RAISE(ABORT, 'balance_after must have at most 2 decimals')
+        END;
+        SELECT CASE
+          WHEN NEW.product_price IS NOT NULL AND (NEW.product_price < 0 OR abs(round(NEW.product_price * 100) - NEW.product_price * 100) > 0.0001)
+          THEN RAISE(ABORT, 'product_price must be >= 0 with 2 decimals')
+        END;
+      END;
+    `);
+  }
+
+  private ensureSchemaVersion(db: SqlJsDatabase): void {
+    const stored = this.readSetting(db, APP_SCHEMA_VERSION_KEY);
+    const parsed = stored ? Number.parseInt(stored, 10) : 0;
+    if (!Number.isFinite(parsed) || parsed < SCHEMA_VERSION) {
+      this.writeSetting(db, APP_SCHEMA_VERSION_KEY, String(SCHEMA_VERSION));
+    }
+  }
+
+  private invalidateTransactionStatsCache(): void {
+    DatabaseManager.transactionStatsCache = null;
   }
 
   private fetchOne<T>(stmt: Statement): T | null {
@@ -933,7 +1315,7 @@ class DatabaseManager {
     selections?: ProductOptionSelection[] | null
   ): { selections: TransactionOptionSelection[]; totalDelta: number } {
     const optionGroups = Array.isArray(product.options) ? product.options : [];
-    if (optionGroups.length === 0 || !Array.isArray(selections) || selections.length === 0) {
+    if (optionGroups.length === 0) {
       return { selections: [], totalDelta: 0 };
     }
 
@@ -944,7 +1326,9 @@ class DatabaseManager {
 
     const normalizedChoicesByGroup = new Map<string, string[]>();
 
-    selections.forEach((selection) => {
+    const selectionList = Array.isArray(selections) ? selections : [];
+
+    selectionList.forEach((selection) => {
       if (!selection || typeof selection.groupId !== 'string') {
         return;
       }
@@ -1268,80 +1652,92 @@ class DatabaseManager {
         : 0;
     const normalizedFlat =
       Number.isFinite(discountFlat) && discountFlat > 0 ? Math.max(0, discountFlat) : 0;
+    const normalizedBalance = this.roundCurrency(initialBalance);
 
     return this.withDatabase((db) => {
-      const typeMap = this.getCustomerTypeMap(db);
-      const normalizedTypeId =
-        typeof typeId === 'string' && typeId.trim().length > 0 ? typeId.trim() : null;
-      const storedTypeId = normalizedTypeId && typeMap.has(normalizedTypeId) ? normalizedTypeId : null;
-      const existingStmt = db.prepare(
-        'SELECT 1 FROM customers WHERE customer_id = ?'
-      );
-      existingStmt.bind([customerId]);
-      const exists = existingStmt.step();
-      existingStmt.free();
+      db.run('BEGIN TRANSACTION');
+      try {
+        const typeMap = this.getCustomerTypeMap(db);
+        const normalizedTypeId =
+          typeof typeId === 'string' && typeId.trim().length > 0 ? typeId.trim() : null;
+        const storedTypeId = normalizedTypeId && typeMap.has(normalizedTypeId) ? normalizedTypeId : null;
+        const existingStmt = db.prepare(
+          'SELECT 1 FROM customers WHERE customer_id = ?'
+        );
+        existingStmt.bind([customerId]);
+        const exists = existingStmt.step();
+        existingStmt.free();
 
-      if (exists) {
-        throw new Error('Customer ID already exists');
-      }
+        if (exists) {
+          throw new Error('Customer ID already exists');
+        }
 
-      const insertStmt = db.prepare(`
-        INSERT INTO customers (customer_id, name, balance, discount_percent, discount_flat, type_id)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `);
-      insertStmt.bind([
-        customerId,
-        normalizedName,
-        initialBalance,
-        normalizedPercent,
-        normalizedFlat,
-        storedTypeId,
-      ]);
-      insertStmt.step();
-      insertStmt.free();
-
-      if (initialBalance > 0) {
-        const transactionId = this.generateTransactionId();
-        const transactionStmt = db.prepare(`
-          INSERT INTO transactions (
-            transaction_id,
-            customer_id,
-            type,
-            amount,
-            balance_after,
-            note
-          ) VALUES (?, ?, 'deposit', ?, ?, ?)
+        const insertStmt = db.prepare(`
+          INSERT INTO customers (customer_id, name, balance, discount_percent, discount_flat, type_id)
+          VALUES (?, ?, ?, ?, ?, ?)
         `);
-        transactionStmt.bind([
-          transactionId,
+        insertStmt.bind([
           customerId,
-          initialBalance,
-          initialBalance,
-          'Initial balance allocation',
+          normalizedName,
+          normalizedBalance,
+          normalizedPercent,
+          normalizedFlat,
+          storedTypeId,
         ]);
-        transactionStmt.step();
-        transactionStmt.free();
+        insertStmt.step();
+        insertStmt.free();
+
+        if (normalizedBalance > 0) {
+          const transactionId = this.generateTransactionId();
+          const transactionStmt = db.prepare(`
+            INSERT INTO transactions (
+              transaction_id,
+              customer_id,
+              type,
+              amount,
+              balance_after,
+              note
+            ) VALUES (?, ?, 'deposit', ?, ?, ?)
+          `);
+          transactionStmt.bind([
+            transactionId,
+            customerId,
+            normalizedBalance,
+            normalizedBalance,
+            'Initial balance allocation',
+          ]);
+          transactionStmt.step();
+          transactionStmt.free();
+        }
+
+        const selectStmt = db.prepare(
+          'SELECT * FROM customers WHERE customer_id = ?'
+        );
+        selectStmt.bind([customerId]);
+        const customerRow = this.fetchOne<Customer>(selectStmt);
+
+        if (!customerRow) {
+          throw new Error('Failed to create customer');
+        }
+
+        const result = this.decorateCustomerWithType(this.hydrateCustomer(customerRow), typeMap);
+        db.run('COMMIT');
+        this.invalidateTransactionStatsCache();
+        return result;
+      } catch (error) {
+        db.run('ROLLBACK');
+        throw error;
       }
-
-      const selectStmt = db.prepare(
-        'SELECT * FROM customers WHERE customer_id = ?'
-      );
-      selectStmt.bind([customerId]);
-      const customerRow = this.fetchOne<Customer>(selectStmt);
-
-      if (!customerRow) {
-        throw new Error('Failed to create customer');
-      }
-
-      return this.decorateCustomerWithType(this.hydrateCustomer(customerRow), typeMap);
     }, true);
   }
 
   public async listCustomers(
     search?: string,
-    limit: number = 50
+    limit: number = 50,
+    offset: number = 0
   ): Promise<Customer[]> {
     const normalizedLimit = Math.max(1, Math.min(limit, 200));
+    const normalizedOffset = Number.isFinite(offset) ? Math.max(0, offset) : 0;
     const trimmedSearch = search?.trim();
 
     return this.withDatabase((db) => {
@@ -1352,12 +1748,13 @@ class DatabaseManager {
           FROM customers
           WHERE customer_id LIKE ? OR name LIKE ?
           ORDER BY updated_at DESC
-          LIMIT ?
+          LIMIT ? OFFSET ?
         `);
         stmt.bind([
           `${trimmedSearch}%`,
           `%${trimmedSearch}%`,
           normalizedLimit,
+          normalizedOffset,
         ]);
         return this.fetchAll<Customer>(stmt)
           .map((customer) => this.hydrateCustomer(customer))
@@ -1368,9 +1765,9 @@ class DatabaseManager {
         SELECT *
         FROM customers
         ORDER BY updated_at DESC
-        LIMIT ?
+        LIMIT ? OFFSET ?
       `);
-      stmt.bind([normalizedLimit]);
+      stmt.bind([normalizedLimit, normalizedOffset]);
       return this.fetchAll<Customer>(stmt)
         .map((customer) => this.hydrateCustomer(customer))
         .map((customer) => this.decorateCustomerWithType(customer, typeMap));
@@ -1405,7 +1802,8 @@ class DatabaseManager {
       throw new Error('Product name is required');
     }
 
-    if (!Number.isFinite(price) || price <= 0) {
+    const normalizedPrice = this.roundCurrency(Number(price));
+    if (!Number.isFinite(normalizedPrice) || normalizedPrice <= 0) {
       throw new Error('Product price must be a positive number');
     }
 
@@ -1448,7 +1846,7 @@ class DatabaseManager {
       insertStmt.bind([
         finalProductId,
         name.trim(),
-        price,
+        normalizedPrice,
         barcode ?? null,
         category ?? null,
         active ? 1 : 0,
@@ -1477,9 +1875,11 @@ class DatabaseManager {
     includeInactive: boolean = false,
     limit: number = 100,
     search?: string,
-    category?: string
+    category?: string,
+    offset: number = 0
   ): Promise<Product[]> {
     const normalizedLimit = Math.max(1, Math.min(limit, 500));
+    const normalizedOffset = Number.isFinite(offset) ? Math.max(0, offset) : 0;
     const trimmedSearch = search?.trim();
     const trimmedCategory = category?.trim();
 
@@ -1493,10 +1893,10 @@ class DatabaseManager {
 
       if (trimmedSearch && trimmedSearch.length > 0) {
         conditions.push(
-          '(name LIKE ? OR product_id LIKE ? OR barcode LIKE ? OR category LIKE ?)' 
+          '(name LIKE ? OR product_id LIKE ? OR barcode LIKE ? OR category LIKE ?)'
         );
-  const likeValue = `%${trimmedSearch}%`;
-  params.push(likeValue, likeValue, likeValue, likeValue);
+        const likeValue = `%${trimmedSearch}%`;
+        params.push(likeValue, likeValue, likeValue, likeValue);
       }
 
       if (trimmedCategory && trimmedCategory.length > 0) {
@@ -1512,8 +1912,8 @@ class DatabaseManager {
       query += includeInactive
         ? ' ORDER BY active DESC, name ASC'
         : ' ORDER BY name ASC';
-      query += ' LIMIT ?';
-      params.push(normalizedLimit);
+      query += ' LIMIT ? OFFSET ?';
+      params.push(normalizedLimit, normalizedOffset);
 
       const stmt = db.prepare(query);
       stmt.bind(params);
@@ -1555,7 +1955,12 @@ class DatabaseManager {
   }
 
   public async getTransactionStatsSummary(): Promise<TransactionStatsSummary> {
-    return this.withDatabase((db) => {
+    const cached = DatabaseManager.transactionStatsCache;
+    if (cached && Date.now() - cached.cachedAt < TRANSACTION_STATS_CACHE_TTL_MS) {
+      return cached.value;
+    }
+
+    const summary = await this.withDatabase((db) => {
       const stmt = db.prepare(`
         SELECT
           SUM(CASE WHEN COALESCE(voided, 0) <> 1 THEN 1 ELSE 0 END) AS total_transactions,
@@ -1615,6 +2020,9 @@ class DatabaseManager {
         lastTransactionAt: typeof row.last_transaction_at === 'string' ? row.last_transaction_at : null,
       };
     });
+
+    DatabaseManager.transactionStatsCache = { value: summary, cachedAt: Date.now() };
+    return summary;
   }
 
   public async getProductByBarcode(barcode: string): Promise<Product | null> {
@@ -1667,135 +2075,148 @@ class DatabaseManager {
     }
   ) {
     return this.withDatabase((db) => {
-      const { barcode, productId, note, selectedOptions } = payload;
+      db.run('BEGIN TRANSACTION');
+      try {
+        const { barcode, productId, note, selectedOptions } = payload;
 
-      if (!barcode && !productId) {
-        throw new Error('Barcode or product ID is required');
-      }
+        if (!barcode && !productId) {
+          throw new Error('Barcode or product ID is required');
+        }
 
-      const customerStmt = db.prepare(
-        'SELECT * FROM customers WHERE customer_id = ?'
-      );
-      customerStmt.bind([customerId]);
-      const customerRow = this.fetchOne<Customer>(customerStmt);
-      if (!customerRow) {
-        throw new Error('Customer not found');
-      }
-      const typeMap = this.getCustomerTypeMap(db);
-      const customer = this.decorateCustomerWithType(this.hydrateCustomer(customerRow), typeMap);
-
-      let product: Product | null = null;
-      if (barcode) {
-        const productStmt = db.prepare(
-          'SELECT * FROM products WHERE barcode = ? AND active = 1'
+        const customerStmt = db.prepare(
+          'SELECT * FROM customers WHERE customer_id = ?'
         );
-        productStmt.bind([barcode]);
-        const productRow = this.fetchOne<Product>(productStmt);
-        product = productRow ? this.hydrateProduct(productRow) : null;
-      } else if (productId) {
-        const productStmt = db.prepare(
-          'SELECT * FROM products WHERE product_id = ? AND active = 1'
+        customerStmt.bind([customerId]);
+        const customerRow = this.fetchOne<Customer>(customerStmt);
+        if (!customerRow) {
+          throw new Error('Customer not found');
+        }
+        const typeMap = this.getCustomerTypeMap(db);
+        const customer = this.decorateCustomerWithType(this.hydrateCustomer(customerRow), typeMap);
+
+        let product: Product | null = null;
+        if (barcode) {
+          const productStmt = db.prepare(
+            'SELECT * FROM products WHERE barcode = ? AND active = 1'
+          );
+          productStmt.bind([barcode]);
+          const productRow = this.fetchOne<Product>(productStmt);
+          product = productRow ? this.hydrateProduct(productRow) : null;
+        } else if (productId) {
+          const productStmt = db.prepare(
+            'SELECT * FROM products WHERE product_id = ? AND active = 1'
+          );
+          productStmt.bind([productId]);
+          const productRow = this.fetchOne<Product>(productStmt);
+          product = productRow ? this.hydrateProduct(productRow) : null;
+        }
+
+        if (!product) {
+          throw new Error('Product not found or inactive');
+        }
+
+        const { selections: optionSelections, totalDelta } = this.normalizeOptionSelections(
+          product,
+          selectedOptions
         );
-        productStmt.bind([productId]);
-        const productRow = this.fetchOne<Product>(productStmt);
-        product = productRow ? this.hydrateProduct(productRow) : null;
-      }
 
-      if (!product) {
-        throw new Error('Product not found or inactive');
-      }
+        const globalDiscount = this.readGlobalDiscount(db);
 
-      const { selections: optionSelections, totalDelta } = this.normalizeOptionSelections(
-        product,
-        selectedOptions
-      );
+        const currentBalance = this.roundCurrency(customer.balance);
+        const basePrice = this.roundCurrency(product.price);
+        const optionsDelta = this.roundCurrency(totalDelta);
+        const optionAdjustedPrice = this.roundCurrency(basePrice + optionsDelta);
 
-      const globalDiscount = this.readGlobalDiscount(db);
+        let finalPrice = optionAdjustedPrice;
+        finalPrice = this.applyDiscount(finalPrice, globalDiscount.percent, globalDiscount.flat);
+        finalPrice = this.applyDiscount(finalPrice, product.discount_percent, product.discount_flat);
+        finalPrice = this.applyDiscount(finalPrice, customer.discount_percent, customer.discount_flat);
+        finalPrice = this.applyDiscount(finalPrice, customer.type_discount_percent, customer.type_discount_flat);
+        finalPrice = this.roundCurrency(finalPrice);
 
-      const currentBalance = this.roundCurrency(customer.balance);
-      const basePrice = this.roundCurrency(product.price);
-      const optionsDelta = this.roundCurrency(totalDelta);
-      const optionAdjustedPrice = this.roundCurrency(basePrice + optionsDelta);
+        if (currentBalance + 0.00001 < finalPrice) {
+          throw new Error('Insufficient balance');
+        }
 
-      let finalPrice = optionAdjustedPrice;
-      finalPrice = this.applyDiscount(finalPrice, globalDiscount.percent, globalDiscount.flat);
-  finalPrice = this.applyDiscount(finalPrice, product.discount_percent, product.discount_flat);
-  finalPrice = this.applyDiscount(finalPrice, customer.discount_percent, customer.discount_flat);
-  finalPrice = this.applyDiscount(finalPrice, customer.type_discount_percent, customer.type_discount_flat);
-      finalPrice = this.roundCurrency(finalPrice);
+        let amount = finalPrice === 0 ? 0 : this.roundCurrency(-finalPrice);
+        if (Object.is(amount, -0)) {
+          amount = 0;
+        }
 
-      if (currentBalance + 0.00001 < finalPrice) {
-        throw new Error('Insufficient balance');
-      }
+        let newBalance = this.roundCurrency(currentBalance + amount);
+        if (newBalance < 0 && newBalance > -0.01) {
+          newBalance = 0;
+        }
+        if (newBalance < 0) {
+          throw new Error('Insufficient balance');
+        }
 
-      let amount = finalPrice === 0 ? 0 : this.roundCurrency(-finalPrice);
-      if (Object.is(amount, -0)) {
-        amount = 0;
-      }
+        const selectionJson = optionSelections.length > 0 ? JSON.stringify(optionSelections) : null;
 
-      let newBalance = this.roundCurrency(currentBalance + amount);
-      if (newBalance < 0 && newBalance > -0.01) {
-        newBalance = 0;
-      }
-      if (newBalance < 0) {
-        throw new Error('Insufficient balance');
-      }
+        const updateStmt = db.prepare(`
+          UPDATE customers
+          SET balance = ?, updated_at = datetime('now')
+          WHERE customer_id = ?
+        `);
+        updateStmt.bind([newBalance, customerId]);
+        updateStmt.step();
+        updateStmt.free();
 
-      const selectionJson = optionSelections.length > 0 ? JSON.stringify(optionSelections) : null;
-
-      const updateStmt = db.prepare(`
-        UPDATE customers
-        SET balance = ?, updated_at = datetime('now')
-        WHERE customer_id = ?
-      `);
-      updateStmt.bind([newBalance, customerId]);
-      updateStmt.step();
-      updateStmt.free();
-
-      const transactionId = this.generateTransactionId();
-      const insertStmt = db.prepare(`
-        INSERT INTO transactions (
-          transaction_id,
-          customer_id,
-          type,
-          product_id,
+        const transactionId = this.generateTransactionId();
+        const insertStmt = db.prepare(`
+          INSERT INTO transactions (
+            transaction_id,
+            customer_id,
+            type,
+            product_id,
+            product_name,
+            product_price,
+            amount,
+            balance_after,
+            note,
+            options_json
+          ) VALUES (?, ?, 'purchase', ?, ?, ?, ?, ?, ?, ?)
+        `);
+        insertStmt.bind([
+          transactionId,
+          customerId,
+          product.product_id,
+          product.name,
+          basePrice,
           amount,
-          balance_after,
-          note,
-          options_json
-        ) VALUES (?, ?, 'purchase', ?, ?, ?, ?, ?)
-      `);
-      insertStmt.bind([
-        transactionId,
-        customerId,
-        product.product_id,
-        amount,
-        newBalance,
-        note ?? null,
-        selectionJson,
-      ]);
-      insertStmt.step();
-      insertStmt.free();
+          newBalance,
+          note ?? null,
+          selectionJson,
+        ]);
+        insertStmt.step();
+        insertStmt.free();
 
-      const selectTransaction = db.prepare(
-        'SELECT * FROM transactions WHERE transaction_id = ?'
-      );
-      selectTransaction.bind([transactionId]);
-      const transactionRow = this.fetchOne<Transaction>(selectTransaction);
-      if (!transactionRow) {
-        throw new Error('Failed to record transaction');
+        const selectTransaction = db.prepare(
+          'SELECT * FROM transactions WHERE transaction_id = ?'
+        );
+        selectTransaction.bind([transactionId]);
+        const transactionRow = this.fetchOne<Transaction>(selectTransaction);
+        if (!transactionRow) {
+          throw new Error('Failed to record transaction');
+        }
+
+        const transaction = this.hydrateTransaction(transactionRow);
+
+        db.run('COMMIT');
+        this.invalidateTransactionStatsCache();
+
+        return {
+          transaction,
+          product,
+          optionSelections,
+          chargedAmount: finalPrice,
+          oldBalance: currentBalance,
+          newBalance,
+        };
+      } catch (error) {
+        db.run('ROLLBACK');
+        throw error;
       }
-
-      const transaction = this.hydrateTransaction(transactionRow);
-
-      return {
-        transaction,
-        product,
-        optionSelections,
-        chargedAmount: finalPrice,
-        oldBalance: currentBalance,
-        newBalance,
-      };
     }, true);
   }
 
@@ -1817,216 +2238,237 @@ class DatabaseManager {
     balanceAfter: number;
   }> {
     return this.withDatabase((db) => {
-      const normalizedTransactionId = typeof transactionId === 'string' ? transactionId.trim() : '';
-      const normalizedCustomerId = typeof payload.customerId === 'string' ? payload.customerId.trim() : '';
-      const normalizedProductId = typeof payload.productId === 'string' ? payload.productId.trim() : '';
+      db.run('BEGIN TRANSACTION');
+      try {
+        const normalizedTransactionId = typeof transactionId === 'string' ? transactionId.trim() : '';
+        const normalizedCustomerId = typeof payload.customerId === 'string' ? payload.customerId.trim() : '';
+        const normalizedProductId = typeof payload.productId === 'string' ? payload.productId.trim() : '';
 
-      if (!normalizedTransactionId) {
-        throw new Error('Transaction ID is required');
+        if (!normalizedTransactionId) {
+          throw new Error('Transaction ID is required');
+        }
+
+        if (!/^[0-9]{4}$/.test(normalizedCustomerId)) {
+          throw new Error('Customer ID must be exactly 4 digits');
+        }
+
+        if (!normalizedProductId) {
+          throw new Error('Product ID is required');
+        }
+
+        const typeMap = this.getCustomerTypeMap(db);
+
+        const transactionStmt = db.prepare('SELECT * FROM transactions WHERE transaction_id = ?');
+        transactionStmt.bind([normalizedTransactionId]);
+        const transactionRow = this.fetchOne<Transaction>(transactionStmt);
+
+        if (!transactionRow) {
+          throw new Error('Transaction not found');
+        }
+
+        const originalTransaction = this.hydrateTransaction(transactionRow);
+
+        if (originalTransaction.type !== 'purchase') {
+          throw new Error('Only purchase transactions can be edited');
+        }
+
+        if (originalTransaction.voided) {
+          throw new Error('This transaction was already voided');
+        }
+
+        if (originalTransaction.customer_id !== normalizedCustomerId) {
+          throw new Error('Transaction does not belong to the provided customer');
+        }
+
+        const latestStmt = db.prepare(`
+          SELECT transaction_id
+          FROM transactions
+          WHERE customer_id = ?
+          ORDER BY timestamp DESC, id DESC
+          LIMIT 1
+        `);
+        latestStmt.bind([normalizedCustomerId]);
+        const latest = this.fetchOne<{ transaction_id: string }>(latestStmt);
+        if (!latest || latest.transaction_id !== normalizedTransactionId) {
+          throw new Error('Only the most recent transaction for the customer can be edited');
+        }
+
+        const customerStmt = db.prepare('SELECT * FROM customers WHERE customer_id = ?');
+        customerStmt.bind([normalizedCustomerId]);
+        const customerRow = this.fetchOne<Customer>(customerStmt);
+
+        if (!customerRow) {
+          throw new Error('Customer not found');
+        }
+
+        const customer = this.decorateCustomerWithType(this.hydrateCustomer(customerRow), typeMap);
+
+        const productStmt = db.prepare(
+          'SELECT * FROM products WHERE product_id = ? AND active = 1'
+        );
+        productStmt.bind([normalizedProductId]);
+        const productRow = this.fetchOne<Product>(productStmt);
+
+        if (!productRow) {
+          throw new Error('Product not found or inactive');
+        }
+
+        const product = this.hydrateProduct(productRow);
+
+        const { selections: optionSelections, totalDelta } = this.normalizeOptionSelections(
+          product,
+          payload.selectedOptions
+        );
+
+        const globalDiscount = this.readGlobalDiscount(db);
+        const basePrice = this.roundCurrency(product.price);
+        const optionsDelta = this.roundCurrency(totalDelta);
+        const optionAdjustedPrice = this.roundCurrency(basePrice + optionsDelta);
+
+        let finalPrice = optionAdjustedPrice;
+        finalPrice = this.applyDiscount(finalPrice, globalDiscount.percent, globalDiscount.flat);
+        finalPrice = this.applyDiscount(finalPrice, product.discount_percent, product.discount_flat);
+        finalPrice = this.applyDiscount(finalPrice, customer.discount_percent, customer.discount_flat);
+        finalPrice = this.applyDiscount(finalPrice, customer.type_discount_percent, customer.type_discount_flat);
+        finalPrice = this.roundCurrency(finalPrice);
+
+        const originalAmount = this.roundCurrency(originalTransaction.amount);
+        if (originalAmount > 0) {
+          throw new Error('This purchase amount cannot be edited');
+        }
+
+        const originalCharge = this.roundCurrency(Math.abs(originalAmount));
+
+        const normalizedNote =
+          typeof payload.note === 'string'
+            ? payload.note.trim().length > 0
+              ? payload.note.trim()
+              : null
+            : originalTransaction.note ?? null;
+
+        const selectionJson = optionSelections.length > 0 ? JSON.stringify(optionSelections) : null;
+        const existingOptionsJson = originalTransaction.options_json ?? null;
+
+        const noOptionChange = existingOptionsJson === selectionJson;
+        const sameProduct = (originalTransaction.product_id ?? null) === product.product_id;
+        const sameCharge = Math.abs(originalCharge - finalPrice) < 0.005;
+        const sameNote = (originalTransaction.note ?? null) === normalizedNote;
+
+        if (sameProduct && noOptionChange && sameCharge && sameNote) {
+          throw new Error('No changes detected for this purchase');
+        }
+
+        const currentBalance = this.roundCurrency(customer.balance);
+        const refundedBalance = this.roundCurrency(currentBalance - originalAmount);
+
+        if (refundedBalance + 0.00001 < finalPrice) {
+          throw new Error('Insufficient balance for the updated purchase');
+        }
+
+        let newAmount = finalPrice === 0 ? 0 : this.roundCurrency(-finalPrice);
+        if (Object.is(newAmount, -0)) {
+          newAmount = 0;
+        }
+
+        let newBalance = this.roundCurrency(refundedBalance + newAmount);
+        if (newBalance < 0 && newBalance > -0.01) {
+          newBalance = 0;
+        }
+
+        if (newBalance < 0) {
+          throw new Error('Insufficient balance for the updated purchase');
+        }
+
+        const replacementTransactionId = this.generateTransactionId();
+
+        const updateCustomerStmt = db.prepare(`
+          UPDATE customers
+          SET balance = ?, updated_at = datetime('now')
+          WHERE customer_id = ?
+        `);
+        updateCustomerStmt.bind([newBalance, normalizedCustomerId]);
+        updateCustomerStmt.step();
+        updateCustomerStmt.free();
+
+        const voidNote = `Superseded by edit ${replacementTransactionId}`;
+        const voidStmt = db.prepare(`
+          UPDATE transactions
+          SET voided = 1,
+              voided_at = datetime('now'),
+              void_note = ?
+          WHERE transaction_id = ?
+        `);
+        voidStmt.bind([voidNote, normalizedTransactionId]);
+        voidStmt.step();
+        voidStmt.free();
+
+        const insertStmt = db.prepare(`
+          INSERT INTO transactions (
+            transaction_id,
+            customer_id,
+            type,
+            product_id,
+            product_name,
+            product_price,
+            amount,
+            balance_after,
+            note,
+            options_json,
+            edit_parent_transaction_id
+          ) VALUES (?, ?, 'purchase', ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+        insertStmt.bind([
+          replacementTransactionId,
+          normalizedCustomerId,
+          product.product_id,
+          product.name,
+          basePrice,
+          newAmount,
+          newBalance,
+          normalizedNote,
+          selectionJson,
+          normalizedTransactionId,
+        ]);
+        insertStmt.step();
+        insertStmt.free();
+
+        const selectNewStmt = db.prepare('SELECT * FROM transactions WHERE transaction_id = ?');
+        selectNewStmt.bind([replacementTransactionId]);
+        const newTransactionRow = this.fetchOne<Transaction>(selectNewStmt);
+
+        if (!newTransactionRow) {
+          throw new Error('Failed to record updated transaction');
+        }
+
+        const newTransaction = this.hydrateTransaction(newTransactionRow);
+
+        const selectVoidedStmt = db.prepare('SELECT * FROM transactions WHERE transaction_id = ?');
+        selectVoidedStmt.bind([normalizedTransactionId]);
+        const voidedRow = this.fetchOne<Transaction>(selectVoidedStmt);
+
+        const voidedTransaction = voidedRow ? this.hydrateTransaction(voidedRow) : {
+          ...originalTransaction,
+          voided: true,
+          void_note: voidNote,
+          voided_at: new Date().toISOString(),
+        };
+
+        db.run('COMMIT');
+        this.invalidateTransactionStatsCache();
+
+        return {
+          transaction: newTransaction,
+          product,
+          optionSelections,
+          chargedAmount: finalPrice,
+          oldTransactionId: normalizedTransactionId,
+          voidedTransaction,
+          balanceAfter: newBalance,
+        };
+      } catch (error) {
+        db.run('ROLLBACK');
+        throw error;
       }
-
-      if (!/^[0-9]{4}$/.test(normalizedCustomerId)) {
-        throw new Error('Customer ID must be exactly 4 digits');
-      }
-
-      if (!normalizedProductId) {
-        throw new Error('Product ID is required');
-      }
-
-  const typeMap = this.getCustomerTypeMap(db);
-
-  const transactionStmt = db.prepare('SELECT * FROM transactions WHERE transaction_id = ?');
-      transactionStmt.bind([normalizedTransactionId]);
-      const transactionRow = this.fetchOne<Transaction>(transactionStmt);
-      transactionStmt.free();
-
-      if (!transactionRow) {
-        throw new Error('Transaction not found');
-      }
-
-      const originalTransaction = this.hydrateTransaction(transactionRow);
-
-      if (originalTransaction.type !== 'purchase') {
-        throw new Error('Only purchase transactions can be edited');
-      }
-
-      if (originalTransaction.voided) {
-        throw new Error('This transaction was already voided');
-      }
-
-      if (originalTransaction.customer_id !== normalizedCustomerId) {
-        throw new Error('Transaction does not belong to the provided customer');
-      }
-
-      const customerStmt = db.prepare('SELECT * FROM customers WHERE customer_id = ?');
-      customerStmt.bind([normalizedCustomerId]);
-      const customerRow = this.fetchOne<Customer>(customerStmt);
-      customerStmt.free();
-
-      if (!customerRow) {
-        throw new Error('Customer not found');
-      }
-
-      const customer = this.decorateCustomerWithType(this.hydrateCustomer(customerRow), typeMap);
-
-      const productStmt = db.prepare(
-        'SELECT * FROM products WHERE product_id = ? AND active = 1'
-      );
-      productStmt.bind([normalizedProductId]);
-      const productRow = this.fetchOne<Product>(productStmt);
-      productStmt.free();
-
-      if (!productRow) {
-        throw new Error('Product not found or inactive');
-      }
-
-      const product = this.hydrateProduct(productRow);
-
-      const { selections: optionSelections, totalDelta } = this.normalizeOptionSelections(
-        product,
-        payload.selectedOptions
-      );
-
-      const globalDiscount = this.readGlobalDiscount(db);
-      const basePrice = this.roundCurrency(product.price);
-      const optionsDelta = this.roundCurrency(totalDelta);
-      const optionAdjustedPrice = this.roundCurrency(basePrice + optionsDelta);
-
-      let finalPrice = optionAdjustedPrice;
-      finalPrice = this.applyDiscount(finalPrice, globalDiscount.percent, globalDiscount.flat);
-  finalPrice = this.applyDiscount(finalPrice, product.discount_percent, product.discount_flat);
-  finalPrice = this.applyDiscount(finalPrice, customer.discount_percent, customer.discount_flat);
-  finalPrice = this.applyDiscount(finalPrice, customer.type_discount_percent, customer.type_discount_flat);
-      finalPrice = this.roundCurrency(finalPrice);
-
-      const originalAmount = this.roundCurrency(originalTransaction.amount);
-      if (originalAmount > 0) {
-        throw new Error('This purchase amount cannot be edited');
-      }
-
-      const originalCharge = this.roundCurrency(Math.abs(originalAmount));
-
-      const normalizedNote =
-        typeof payload.note === 'string'
-          ? payload.note.trim().length > 0
-            ? payload.note.trim()
-            : null
-          : originalTransaction.note ?? null;
-
-      const selectionJson = optionSelections.length > 0 ? JSON.stringify(optionSelections) : null;
-      const existingOptionsJson = originalTransaction.options_json ?? null;
-
-      const noOptionChange = existingOptionsJson === selectionJson;
-      const sameProduct = (originalTransaction.product_id ?? null) === product.product_id;
-      const sameCharge = Math.abs(originalCharge - finalPrice) < 0.005;
-      const sameNote = (originalTransaction.note ?? null) === normalizedNote;
-
-      if (sameProduct && noOptionChange && sameCharge && sameNote) {
-        throw new Error('No changes detected for this purchase');
-      }
-
-      const currentBalance = this.roundCurrency(customer.balance);
-      const refundedBalance = this.roundCurrency(currentBalance - originalAmount);
-
-      if (refundedBalance + 0.00001 < finalPrice) {
-        throw new Error('Insufficient balance for the updated purchase');
-      }
-
-      let newAmount = finalPrice === 0 ? 0 : this.roundCurrency(-finalPrice);
-      if (Object.is(newAmount, -0)) {
-        newAmount = 0;
-      }
-
-      let newBalance = this.roundCurrency(refundedBalance + newAmount);
-      if (newBalance < 0 && newBalance > -0.01) {
-        newBalance = 0;
-      }
-
-      if (newBalance < 0) {
-        throw new Error('Insufficient balance for the updated purchase');
-      }
-
-      const replacementTransactionId = this.generateTransactionId();
-
-      const updateCustomerStmt = db.prepare(`
-        UPDATE customers
-        SET balance = ?, updated_at = datetime('now')
-        WHERE customer_id = ?
-      `);
-      updateCustomerStmt.bind([newBalance, normalizedCustomerId]);
-      updateCustomerStmt.step();
-      updateCustomerStmt.free();
-
-      const voidNote = `Superseded by edit ${replacementTransactionId}`;
-      const voidStmt = db.prepare(`
-        UPDATE transactions
-        SET voided = 1,
-            voided_at = datetime('now'),
-            void_note = ?
-        WHERE transaction_id = ?
-      `);
-      voidStmt.bind([voidNote, normalizedTransactionId]);
-      voidStmt.step();
-      voidStmt.free();
-
-      const insertStmt = db.prepare(`
-        INSERT INTO transactions (
-          transaction_id,
-          customer_id,
-          type,
-          product_id,
-          amount,
-          balance_after,
-          note,
-          options_json,
-          edit_parent_transaction_id
-        ) VALUES (?, ?, 'purchase', ?, ?, ?, ?, ?, ?)
-      `);
-      insertStmt.bind([
-        replacementTransactionId,
-        normalizedCustomerId,
-        product.product_id,
-        newAmount,
-        newBalance,
-        normalizedNote,
-        selectionJson,
-        normalizedTransactionId,
-      ]);
-      insertStmt.step();
-      insertStmt.free();
-
-      const selectNewStmt = db.prepare('SELECT * FROM transactions WHERE transaction_id = ?');
-      selectNewStmt.bind([replacementTransactionId]);
-      const newTransactionRow = this.fetchOne<Transaction>(selectNewStmt);
-      selectNewStmt.free();
-
-      if (!newTransactionRow) {
-        throw new Error('Failed to record updated transaction');
-      }
-
-      const newTransaction = this.hydrateTransaction(newTransactionRow);
-
-      const selectVoidedStmt = db.prepare('SELECT * FROM transactions WHERE transaction_id = ?');
-      selectVoidedStmt.bind([normalizedTransactionId]);
-      const voidedRow = this.fetchOne<Transaction>(selectVoidedStmt);
-      selectVoidedStmt.free();
-
-      const voidedTransaction = voidedRow ? this.hydrateTransaction(voidedRow) : {
-        ...originalTransaction,
-        voided: true,
-        void_note: voidNote,
-        voided_at: new Date().toISOString(),
-      };
-
-      return {
-        transaction: newTransaction,
-        product,
-        optionSelections,
-        chargedAmount: finalPrice,
-        oldTransactionId: normalizedTransactionId,
-        voidedTransaction,
-        balanceAfter: newBalance,
-      };
     }, true);
   }
 
@@ -2044,151 +2486,169 @@ class DatabaseManager {
     oldTransactionId: string;
   }> {
     return this.withDatabase((db) => {
-      const normalizedTransactionId = typeof transactionId === 'string' ? transactionId.trim() : '';
-      if (!normalizedTransactionId) {
-        throw new Error('Transaction ID is required');
+      db.run('BEGIN TRANSACTION');
+      try {
+        const normalizedTransactionId = typeof transactionId === 'string' ? transactionId.trim() : '';
+        if (!normalizedTransactionId) {
+          throw new Error('Transaction ID is required');
+        }
+
+        const amountInput = typeof payload.amount === 'number' ? payload.amount : Number.NaN;
+        if (!Number.isFinite(amountInput)) {
+          throw new Error('Amount must be numeric');
+        }
+
+        const transactionStmt = db.prepare('SELECT * FROM transactions WHERE transaction_id = ?');
+        transactionStmt.bind([normalizedTransactionId]);
+        const transactionRow = this.fetchOne<Transaction>(transactionStmt);
+
+        if (!transactionRow) {
+          throw new Error('Transaction not found');
+        }
+
+        const transaction = this.hydrateTransaction(transactionRow);
+
+        if (transaction.voided) {
+          throw new Error('This transaction was already voided');
+        }
+
+        if (transaction.type !== 'deposit' && transaction.type !== 'adjustment') {
+          throw new Error('Only deposits or adjustments can be edited here');
+        }
+
+        const normalizedCustomerId = typeof payload.customerId === 'string' ? payload.customerId.trim() : '';
+        if (!/^[0-9]{4}$/.test(normalizedCustomerId)) {
+          throw new Error('Customer ID must match original transaction');
+        }
+
+        if (transaction.customer_id !== normalizedCustomerId) {
+          throw new Error('Transaction does not belong to this customer');
+        }
+
+        const latestStmt = db.prepare(`
+          SELECT transaction_id
+          FROM transactions
+          WHERE customer_id = ?
+          ORDER BY timestamp DESC, id DESC
+          LIMIT 1
+        `);
+        latestStmt.bind([normalizedCustomerId]);
+        const latest = this.fetchOne<{ transaction_id: string }>(latestStmt);
+        if (!latest || latest.transaction_id !== normalizedTransactionId) {
+          throw new Error('Only the most recent transaction for the customer can be edited');
+        }
+
+        const nextAmount = this.roundCurrency(amountInput);
+        if (transaction.type === 'deposit' && nextAmount <= 0) {
+          throw new Error('Deposits must be a positive amount');
+        }
+        if (transaction.type === 'adjustment' && nextAmount === 0) {
+          throw new Error('Adjustment amount cannot be zero');
+        }
+
+        const originalAmount = this.roundCurrency(transaction.amount);
+        if (Math.abs(originalAmount - nextAmount) < 0.005 && (transaction.note ?? '') === (payload.note ?? '')) {
+          throw new Error('No changes detected for this entry');
+        }
+
+        const customerStmt = db.prepare('SELECT * FROM customers WHERE customer_id = ?');
+        customerStmt.bind([normalizedCustomerId]);
+        const customerRow = this.fetchOne<Customer>(customerStmt);
+
+        if (!customerRow) {
+          throw new Error('Customer not found');
+        }
+
+        const customer = this.hydrateCustomer(customerRow);
+        const currentBalance = this.roundCurrency(customer.balance);
+        const preBalance = this.roundCurrency(currentBalance - originalAmount);
+
+        let newBalance = this.roundCurrency(preBalance + nextAmount);
+        if (newBalance < 0 && newBalance > -0.01) {
+          newBalance = 0;
+        }
+
+        if (newBalance < 0) {
+          throw new Error('Resulting balance would be negative');
+        }
+
+        const replacementTransactionId = this.generateTransactionId();
+        const normalizedNote = typeof payload.note === 'string' && payload.note.trim().length > 0 ? payload.note.trim() : null;
+
+        const updateCustomerStmt = db.prepare(`
+          UPDATE customers
+          SET balance = ?, updated_at = datetime('now')
+          WHERE customer_id = ?
+        `);
+        updateCustomerStmt.bind([newBalance, normalizedCustomerId]);
+        updateCustomerStmt.step();
+        updateCustomerStmt.free();
+
+        const voidNote = `Superseded by edit ${replacementTransactionId}`;
+        const voidStmt = db.prepare(`
+          UPDATE transactions
+          SET voided = 1,
+              voided_at = datetime('now'),
+              void_note = ?
+          WHERE transaction_id = ?
+        `);
+        voidStmt.bind([voidNote, normalizedTransactionId]);
+        voidStmt.step();
+        voidStmt.free();
+
+        const insertStmt = db.prepare(`
+          INSERT INTO transactions (
+            transaction_id,
+            customer_id,
+            type,
+            amount,
+            balance_after,
+            note,
+            edit_parent_transaction_id
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        `);
+        insertStmt.bind([
+          replacementTransactionId,
+          normalizedCustomerId,
+          transaction.type,
+          nextAmount,
+          newBalance,
+          normalizedNote,
+          normalizedTransactionId,
+        ]);
+        insertStmt.step();
+        insertStmt.free();
+
+        const selectNewStmt = db.prepare('SELECT * FROM transactions WHERE transaction_id = ?');
+        selectNewStmt.bind([replacementTransactionId]);
+        const newTransactionRow = this.fetchOne<Transaction>(selectNewStmt);
+
+        if (!newTransactionRow) {
+          throw new Error('Failed to record updated transaction');
+        }
+
+        const newTransaction = this.hydrateTransaction(newTransactionRow);
+
+        const selectOldStmt = db.prepare('SELECT * FROM transactions WHERE transaction_id = ?');
+        selectOldStmt.bind([normalizedTransactionId]);
+        const oldRow = this.fetchOne<Transaction>(selectOldStmt);
+        const voidedTransaction = oldRow
+          ? this.hydrateTransaction(oldRow)
+          : { ...transaction, voided: true, void_note: voidNote, voided_at: new Date().toISOString() };
+
+        db.run('COMMIT');
+        this.invalidateTransactionStatsCache();
+
+        return {
+          transaction: newTransaction,
+          voidedTransaction,
+          balanceAfter: newBalance,
+          oldTransactionId: normalizedTransactionId,
+        };
+      } catch (error) {
+        db.run('ROLLBACK');
+        throw error;
       }
-
-      const amountInput = typeof payload.amount === 'number' ? payload.amount : Number.NaN;
-      if (!Number.isFinite(amountInput)) {
-        throw new Error('Amount must be numeric');
-      }
-
-      const transactionStmt = db.prepare('SELECT * FROM transactions WHERE transaction_id = ?');
-      transactionStmt.bind([normalizedTransactionId]);
-      const transactionRow = this.fetchOne<Transaction>(transactionStmt);
-      transactionStmt.free();
-
-      if (!transactionRow) {
-        throw new Error('Transaction not found');
-      }
-
-      const transaction = this.hydrateTransaction(transactionRow);
-
-      if (transaction.voided) {
-        throw new Error('This transaction was already voided');
-      }
-
-      if (transaction.type !== 'deposit' && transaction.type !== 'adjustment') {
-        throw new Error('Only deposits or adjustments can be edited here');
-      }
-
-      const normalizedCustomerId = typeof payload.customerId === 'string' ? payload.customerId.trim() : '';
-      if (!/^[0-9]{4}$/.test(normalizedCustomerId)) {
-        throw new Error('Customer ID must match original transaction');
-      }
-
-      if (transaction.customer_id !== normalizedCustomerId) {
-        throw new Error('Transaction does not belong to this customer');
-      }
-
-  const nextAmount = this.roundCurrency(amountInput);
-      if (transaction.type === 'deposit' && nextAmount <= 0) {
-        throw new Error('Deposits must be a positive amount');
-      }
-      if (transaction.type === 'adjustment' && nextAmount === 0) {
-        throw new Error('Adjustment amount cannot be zero');
-      }
-
-      const originalAmount = this.roundCurrency(transaction.amount);
-      if (Math.abs(originalAmount - nextAmount) < 0.005 && (transaction.note ?? '') === (payload.note ?? '')) {
-        throw new Error('No changes detected for this entry');
-      }
-
-      const customerStmt = db.prepare('SELECT * FROM customers WHERE customer_id = ?');
-      customerStmt.bind([normalizedCustomerId]);
-      const customerRow = this.fetchOne<Customer>(customerStmt);
-      customerStmt.free();
-
-      if (!customerRow) {
-        throw new Error('Customer not found');
-      }
-
-      const customer = this.hydrateCustomer(customerRow);
-      const currentBalance = this.roundCurrency(customer.balance);
-      const preBalance = this.roundCurrency(currentBalance - originalAmount);
-
-      let newBalance = this.roundCurrency(preBalance + nextAmount);
-      if (newBalance < 0 && newBalance > -0.01) {
-        newBalance = 0;
-      }
-
-      if (newBalance < 0) {
-        throw new Error('Resulting balance would be negative');
-      }
-
-      const replacementTransactionId = this.generateTransactionId();
-      const normalizedNote = typeof payload.note === 'string' && payload.note.trim().length > 0 ? payload.note.trim() : null;
-
-      const updateCustomerStmt = db.prepare(`
-        UPDATE customers
-        SET balance = ?, updated_at = datetime('now')
-        WHERE customer_id = ?
-      `);
-      updateCustomerStmt.bind([newBalance, normalizedCustomerId]);
-      updateCustomerStmt.step();
-      updateCustomerStmt.free();
-
-      const voidNote = `Superseded by edit ${replacementTransactionId}`;
-      const voidStmt = db.prepare(`
-        UPDATE transactions
-        SET voided = 1,
-            voided_at = datetime('now'),
-            void_note = ?
-        WHERE transaction_id = ?
-      `);
-      voidStmt.bind([voidNote, normalizedTransactionId]);
-      voidStmt.step();
-      voidStmt.free();
-
-      const insertStmt = db.prepare(`
-        INSERT INTO transactions (
-          transaction_id,
-          customer_id,
-          type,
-          amount,
-          balance_after,
-          note,
-          edit_parent_transaction_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-      `);
-      insertStmt.bind([
-        replacementTransactionId,
-        normalizedCustomerId,
-        transaction.type,
-        nextAmount,
-        newBalance,
-        normalizedNote,
-        normalizedTransactionId,
-      ]);
-      insertStmt.step();
-      insertStmt.free();
-
-      const selectNewStmt = db.prepare('SELECT * FROM transactions WHERE transaction_id = ?');
-      selectNewStmt.bind([replacementTransactionId]);
-      const newTransactionRow = this.fetchOne<Transaction>(selectNewStmt);
-      selectNewStmt.free();
-
-      if (!newTransactionRow) {
-        throw new Error('Failed to record updated transaction');
-      }
-
-      const newTransaction = this.hydrateTransaction(newTransactionRow);
-
-      const selectOldStmt = db.prepare('SELECT * FROM transactions WHERE transaction_id = ?');
-      selectOldStmt.bind([normalizedTransactionId]);
-      const oldRow = this.fetchOne<Transaction>(selectOldStmt);
-      selectOldStmt.free();
-      const voidedTransaction = oldRow
-        ? this.hydrateTransaction(oldRow)
-        : { ...transaction, voided: true, void_note: voidNote, voided_at: new Date().toISOString() };
-
-      return {
-        transaction: newTransaction,
-        voidedTransaction,
-        balanceAfter: newBalance,
-        oldTransactionId: normalizedTransactionId,
-      };
     }, true);
   }
 
@@ -2298,9 +2758,19 @@ class DatabaseManager {
     }, true);
   }
 
-  public async listAllTransactions(): Promise<TransactionExportRow[]> {
+  public async listAllTransactions(limit?: number, offset?: number): Promise<TransactionExportRow[]> {
     return this.withDatabase((db) => {
-      const stmt = db.prepare(`
+      let normalizedLimit =
+        typeof limit === 'number' && Number.isFinite(limit)
+          ? Math.max(1, Math.min(limit, 500))
+          : null;
+      const normalizedOffset =
+        typeof offset === 'number' && Number.isFinite(offset) ? Math.max(0, offset) : 0;
+      if (normalizedLimit === null && normalizedOffset > 0) {
+        normalizedLimit = 500;
+      }
+
+      let query = `
         SELECT
           t.transaction_id,
           t.timestamp,
@@ -2308,8 +2778,8 @@ class DatabaseManager {
           c.name AS customer_name,
           t.type,
           t.product_id,
-          p.name AS product_name,
-          p.price AS product_price,
+          COALESCE(t.product_name, p.name) AS product_name,
+          COALESCE(t.product_price, p.price) AS product_price,
           t.amount,
           t.balance_after,
           t.note,
@@ -2322,7 +2792,21 @@ class DatabaseManager {
         LEFT JOIN customers c ON c.customer_id = t.customer_id
         LEFT JOIN products p ON p.product_id = t.product_id
         ORDER BY t.timestamp DESC, t.id DESC
-      `);
+      `;
+
+      const params: Array<number> = [];
+      if (normalizedLimit !== null) {
+        query += normalizedOffset > 0 ? ' LIMIT ? OFFSET ?' : ' LIMIT ?';
+        params.push(normalizedLimit);
+        if (normalizedOffset > 0) {
+          params.push(normalizedOffset);
+        }
+      }
+
+      const stmt = db.prepare(query);
+      if (params.length > 0) {
+        stmt.bind(params);
+      }
       const rows = this.fetchAll<TransactionExportRow & { voided?: number; options_json?: string | null }>(stmt);
       return rows.map((row) => ({
         ...row,
@@ -2335,69 +2819,100 @@ class DatabaseManager {
     });
   }
 
+  public async getTransactionCount(): Promise<number> {
+    return this.withDatabase((db) => {
+      const stmt = db.prepare('SELECT COUNT(*) AS count FROM transactions');
+      const row = this.fetchOne<{ count?: number }>(stmt);
+      const count = row?.count;
+      return typeof count === 'number' && Number.isFinite(count) ? count : 0;
+    });
+  }
+
   public async processDeposit(
     customerId: string,
     amount: number,
     note?: string
   ) {
     return this.withDatabase((db) => {
-      const customerStmt = db.prepare(
-        'SELECT * FROM customers WHERE customer_id = ?'
-      );
-      customerStmt.bind([customerId]);
-      const customer = this.fetchOne<Customer>(customerStmt);
-      if (!customer) {
-        throw new Error('Customer not found');
+      db.run('BEGIN TRANSACTION');
+      try {
+        if (!/^[0-9]{4}$/.test(customerId)) {
+          throw new Error('Customer ID must be exactly 4 digits');
+        }
+
+        const normalizedAmount = this.roundCurrency(Number(amount));
+        if (!Number.isFinite(normalizedAmount) || normalizedAmount <= 0) {
+          throw new Error('Deposit amount must be a positive number');
+        }
+
+        const customerStmt = db.prepare(
+          'SELECT * FROM customers WHERE customer_id = ?'
+        );
+        customerStmt.bind([customerId]);
+        const customer = this.fetchOne<Customer>(customerStmt);
+        if (!customer) {
+          throw new Error('Customer not found');
+        }
+
+        const currentBalance = this.roundCurrency(customer.balance);
+        let newBalance = this.roundCurrency(currentBalance + normalizedAmount);
+        if (newBalance < 0 && newBalance > -0.01) {
+          newBalance = 0;
+        }
+
+        const updateStmt = db.prepare(`
+          UPDATE customers
+          SET balance = ?, updated_at = datetime('now')
+          WHERE customer_id = ?
+        `);
+        updateStmt.bind([newBalance, customerId]);
+        updateStmt.step();
+        updateStmt.free();
+
+        const transactionId = this.generateTransactionId();
+        const insertStmt = db.prepare(`
+          INSERT INTO transactions (
+            transaction_id,
+            customer_id,
+            type,
+            amount,
+            balance_after,
+            note
+          ) VALUES (?, ?, 'deposit', ?, ?, ?)
+        `);
+        insertStmt.bind([
+          transactionId,
+          customerId,
+          normalizedAmount,
+          newBalance,
+          note ?? null,
+        ]);
+        insertStmt.step();
+        insertStmt.free();
+
+        const selectTransaction = db.prepare(
+          'SELECT * FROM transactions WHERE transaction_id = ?'
+        );
+        selectTransaction.bind([transactionId]);
+        const transactionRow = this.fetchOne<Transaction>(selectTransaction);
+        if (!transactionRow) {
+          throw new Error('Failed to record transaction');
+        }
+
+        const transaction = this.hydrateTransaction(transactionRow);
+
+        db.run('COMMIT');
+        this.invalidateTransactionStatsCache();
+
+        return {
+          transaction,
+          oldBalance: currentBalance,
+          newBalance,
+        };
+      } catch (error) {
+        db.run('ROLLBACK');
+        throw error;
       }
-
-      const newBalance = customer.balance + amount;
-
-      const updateStmt = db.prepare(`
-        UPDATE customers
-        SET balance = ?, updated_at = datetime('now')
-        WHERE customer_id = ?
-      `);
-      updateStmt.bind([newBalance, customerId]);
-      updateStmt.step();
-      updateStmt.free();
-
-      const transactionId = this.generateTransactionId();
-      const insertStmt = db.prepare(`
-        INSERT INTO transactions (
-          transaction_id,
-          customer_id,
-          type,
-          amount,
-          balance_after,
-          note
-        ) VALUES (?, ?, 'deposit', ?, ?, ?)
-      `);
-      insertStmt.bind([
-        transactionId,
-        customerId,
-        amount,
-        newBalance,
-        note ?? null,
-      ]);
-      insertStmt.step();
-      insertStmt.free();
-
-      const selectTransaction = db.prepare(
-        'SELECT * FROM transactions WHERE transaction_id = ?'
-      );
-      selectTransaction.bind([transactionId]);
-      const transactionRow = this.fetchOne<Transaction>(selectTransaction);
-      if (!transactionRow) {
-        throw new Error('Failed to record transaction');
-      }
-
-      const transaction = this.hydrateTransaction(transactionRow);
-
-      return {
-        transaction,
-        oldBalance: customer.balance,
-        newBalance,
-      };
     }, true);
   }
 
@@ -2407,66 +2922,89 @@ class DatabaseManager {
     note?: string
   ) {
     return this.withDatabase((db) => {
-      const customerStmt = db.prepare(
-        'SELECT * FROM customers WHERE customer_id = ?'
-      );
-      customerStmt.bind([customerId]);
-      const customer = this.fetchOne<Customer>(customerStmt);
-      if (!customer) {
-        throw new Error('Customer not found');
+      db.run('BEGIN TRANSACTION');
+      try {
+        if (!/^[0-9]{4}$/.test(customerId)) {
+          throw new Error('Customer ID must be exactly 4 digits');
+        }
+
+        const normalizedAmount = this.roundCurrency(Number(amount));
+        if (!Number.isFinite(normalizedAmount) || normalizedAmount === 0) {
+          throw new Error('Adjustment amount must be a non-zero number');
+        }
+
+        const customerStmt = db.prepare(
+          'SELECT * FROM customers WHERE customer_id = ?'
+        );
+        customerStmt.bind([customerId]);
+        const customer = this.fetchOne<Customer>(customerStmt);
+        if (!customer) {
+          throw new Error('Customer not found');
+        }
+
+        const currentBalance = this.roundCurrency(customer.balance);
+        let newBalance = this.roundCurrency(currentBalance + normalizedAmount);
+        if (newBalance < 0 && Math.abs(normalizedAmount) > 50) {
+          throw new Error('Adjustment would result in very negative balance');
+        }
+
+        if (newBalance < 0 && newBalance > -0.01) {
+          newBalance = 0;
+        }
+
+        const updateStmt = db.prepare(`
+          UPDATE customers
+          SET balance = ?, updated_at = datetime('now')
+          WHERE customer_id = ?
+        `);
+        updateStmt.bind([newBalance, customerId]);
+        updateStmt.step();
+        updateStmt.free();
+
+        const transactionId = this.generateTransactionId();
+        const insertStmt = db.prepare(`
+          INSERT INTO transactions (
+            transaction_id,
+            customer_id,
+            type,
+            amount,
+            balance_after,
+            note
+          ) VALUES (?, ?, 'adjustment', ?, ?, ?)
+        `);
+        insertStmt.bind([
+          transactionId,
+          customerId,
+          normalizedAmount,
+          newBalance,
+          note ?? null,
+        ]);
+        insertStmt.step();
+        insertStmt.free();
+
+        const selectTransaction = db.prepare(
+          'SELECT * FROM transactions WHERE transaction_id = ?'
+        );
+        selectTransaction.bind([transactionId]);
+        const transactionRow = this.fetchOne<Transaction>(selectTransaction);
+        if (!transactionRow) {
+          throw new Error('Failed to record transaction');
+        }
+
+        const transaction = this.hydrateTransaction(transactionRow);
+
+        db.run('COMMIT');
+        this.invalidateTransactionStatsCache();
+
+        return {
+          transaction,
+          oldBalance: currentBalance,
+          newBalance,
+        };
+      } catch (error) {
+        db.run('ROLLBACK');
+        throw error;
       }
-
-      const newBalance = customer.balance + amount;
-      if (newBalance < 0 && Math.abs(amount) > 50) {
-        throw new Error('Adjustment would result in very negative balance');
-      }
-
-      const updateStmt = db.prepare(`
-        UPDATE customers
-        SET balance = ?, updated_at = datetime('now')
-        WHERE customer_id = ?
-      `);
-      updateStmt.bind([newBalance, customerId]);
-      updateStmt.step();
-      updateStmt.free();
-
-      const transactionId = this.generateTransactionId();
-      const insertStmt = db.prepare(`
-        INSERT INTO transactions (
-          transaction_id,
-          customer_id,
-          type,
-          amount,
-          balance_after,
-          note
-        ) VALUES (?, ?, 'adjustment', ?, ?, ?)
-      `);
-      insertStmt.bind([
-        transactionId,
-        customerId,
-        amount,
-        newBalance,
-        note ?? null,
-      ]);
-      insertStmt.step();
-      insertStmt.free();
-
-      const selectTransaction = db.prepare(
-        'SELECT * FROM transactions WHERE transaction_id = ?'
-      );
-      selectTransaction.bind([transactionId]);
-      const transactionRow = this.fetchOne<Transaction>(selectTransaction);
-      if (!transactionRow) {
-        throw new Error('Failed to record transaction');
-      }
-
-      const transaction = this.hydrateTransaction(transactionRow);
-
-      return {
-        transaction,
-        oldBalance: customer.balance,
-        newBalance,
-      };
     }, true);
   }
 
@@ -2696,90 +3234,98 @@ class DatabaseManager {
     }
 
     return this.withDatabase((db) => {
-      const transactionStmt = db.prepare(
-        'SELECT * FROM transactions WHERE transaction_id = ?'
-      );
-      transactionStmt.bind([transactionId]);
-      const transactionRow = this.fetchOne<Transaction>(transactionStmt);
+      db.run('BEGIN TRANSACTION');
+      try {
+        const transactionStmt = db.prepare(
+          'SELECT * FROM transactions WHERE transaction_id = ?'
+        );
+        transactionStmt.bind([transactionId]);
+        const transactionRow = this.fetchOne<Transaction>(transactionStmt);
 
-      if (!transactionRow) {
-        throw new Error('Transaction not found');
+        if (!transactionRow) {
+          throw new Error('Transaction not found');
+        }
+
+        const transaction = this.hydrateTransaction(transactionRow);
+
+        if (transaction.voided) {
+          throw new Error('Transaction is already voided');
+        }
+
+        if (transaction.type !== 'purchase' && transaction.type !== 'deposit') {
+          throw new Error('Only purchase or deposit transactions can be deleted');
+        }
+
+        const latestStmt = db.prepare(`
+          SELECT transaction_id
+          FROM transactions
+          WHERE customer_id = ?
+          ORDER BY timestamp DESC, id DESC
+          LIMIT 1
+        `);
+        latestStmt.bind([transaction.customer_id]);
+        const latest = this.fetchOne<{ transaction_id: string }>(latestStmt);
+        if (!latest || latest.transaction_id !== transactionId) {
+          throw new Error('Only the most recent transaction for the customer can be deleted');
+        }
+
+        const customerStmt = db.prepare(
+          'SELECT * FROM customers WHERE customer_id = ?'
+        );
+        customerStmt.bind([transaction.customer_id]);
+        const customer = this.fetchOne<Customer>(customerStmt);
+        if (!customer) {
+          throw new Error('Customer not found');
+        }
+
+        const currentBalance = this.roundCurrency(customer.balance);
+        const amount = this.roundCurrency(transaction.amount);
+        let newBalance = this.roundCurrency(currentBalance - amount);
+        if (newBalance < 0 && newBalance > -0.01) {
+          newBalance = 0;
+        }
+
+        const updateStmt = db.prepare(`
+          UPDATE customers
+          SET balance = ?, updated_at = datetime('now')
+          WHERE customer_id = ?
+        `);
+        updateStmt.bind([newBalance, transaction.customer_id]);
+        updateStmt.step();
+        updateStmt.free();
+
+        const voidNote = note?.trim() && note.trim().length > 0 ? note.trim() : 'Voided manually';
+        const voidStmt = db.prepare(`
+          UPDATE transactions
+          SET voided = 1,
+              voided_at = datetime('now'),
+              void_note = ?
+          WHERE transaction_id = ?
+        `);
+        voidStmt.bind([voidNote, transactionId]);
+        voidStmt.step();
+        voidStmt.free();
+
+        const refreshedStmt = db.prepare('SELECT * FROM transactions WHERE transaction_id = ?');
+        refreshedStmt.bind([transactionId]);
+        const refreshedRow = this.fetchOne<Transaction>(refreshedStmt);
+
+        const updatedTransaction = refreshedRow
+          ? this.hydrateTransaction(refreshedRow)
+          : { ...transaction, voided: true, void_note: voidNote, voided_at: new Date().toISOString() };
+
+        db.run('COMMIT');
+        this.invalidateTransactionStatsCache();
+
+        return {
+          transaction: updatedTransaction,
+          customerId: transaction.customer_id,
+          newBalance,
+        };
+      } catch (error) {
+        db.run('ROLLBACK');
+        throw error;
       }
-
-      const transaction = this.hydrateTransaction(transactionRow);
-
-      if (transaction.voided) {
-        throw new Error('Transaction is already voided');
-      }
-
-      if (transaction.type !== 'purchase' && transaction.type !== 'deposit') {
-        throw new Error('Only purchase or deposit transactions can be deleted');
-      }
-
-      const latestStmt = db.prepare(`
-        SELECT transaction_id
-        FROM transactions
-        WHERE customer_id = ?
-        ORDER BY timestamp DESC, id DESC
-        LIMIT 1
-      `);
-      latestStmt.bind([transaction.customer_id]);
-      const latest = this.fetchOne<{ transaction_id: string }>(latestStmt);
-      if (!latest || latest.transaction_id !== transactionId) {
-        throw new Error('Only the most recent transaction for the customer can be deleted');
-      }
-
-      const customerStmt = db.prepare(
-        'SELECT * FROM customers WHERE customer_id = ?'
-      );
-      customerStmt.bind([transaction.customer_id]);
-      const customer = this.fetchOne<Customer>(customerStmt);
-      if (!customer) {
-        throw new Error('Customer not found');
-      }
-
-      const currentBalance = this.roundCurrency(customer.balance);
-      const amount = this.roundCurrency(transaction.amount);
-      let newBalance = this.roundCurrency(currentBalance - amount);
-      if (newBalance < 0 && newBalance > -0.01) {
-        newBalance = 0;
-      }
-
-      const updateStmt = db.prepare(`
-        UPDATE customers
-        SET balance = ?, updated_at = datetime('now')
-        WHERE customer_id = ?
-      `);
-      updateStmt.bind([newBalance, transaction.customer_id]);
-      updateStmt.step();
-      updateStmt.free();
-
-      const voidNote = note?.trim() && note.trim().length > 0 ? note.trim() : 'Voided manually';
-      const voidStmt = db.prepare(`
-        UPDATE transactions
-        SET voided = 1,
-            voided_at = datetime('now'),
-            void_note = ?
-        WHERE transaction_id = ?
-      `);
-      voidStmt.bind([voidNote, transactionId]);
-      voidStmt.step();
-      voidStmt.free();
-
-      const refreshedStmt = db.prepare('SELECT * FROM transactions WHERE transaction_id = ?');
-      refreshedStmt.bind([transactionId]);
-      const refreshedRow = this.fetchOne<Transaction>(refreshedStmt);
-      refreshedStmt.free();
-
-      const updatedTransaction = refreshedRow
-        ? this.hydrateTransaction(refreshedRow)
-        : { ...transaction, voided: true, void_note: voidNote, voided_at: new Date().toISOString() };
-
-      return {
-        transaction: updatedTransaction,
-        customerId: transaction.customer_id,
-        newBalance,
-      };
     }, true);
   }
 
@@ -2789,99 +3335,104 @@ class DatabaseManager {
     }
 
     return this.withDatabase((db) => {
-      const transactionStmt = db.prepare(
-        'SELECT * FROM transactions WHERE transaction_id = ?'
-      );
-      transactionStmt.bind([transactionId]);
-      const transactionRow = this.fetchOne<Transaction>(transactionStmt);
-      transactionStmt.free();
+      db.run('BEGIN TRANSACTION');
+      try {
+        const transactionStmt = db.prepare(
+          'SELECT * FROM transactions WHERE transaction_id = ?'
+        );
+        transactionStmt.bind([transactionId]);
+        const transactionRow = this.fetchOne<Transaction>(transactionStmt);
 
-      if (!transactionRow) {
-        throw new Error('Transaction not found');
+        if (!transactionRow) {
+          throw new Error('Transaction not found');
+        }
+
+        const transaction = this.hydrateTransaction(transactionRow);
+
+        if (!transaction.voided) {
+          throw new Error('This transaction is not voided');
+        }
+
+        if (transaction.type !== 'purchase' && transaction.type !== 'deposit') {
+          throw new Error('Only purchase or deposit transactions can be unvoided');
+        }
+
+        const latestStmt = db.prepare(`
+          SELECT transaction_id
+          FROM transactions
+          WHERE customer_id = ?
+          ORDER BY timestamp DESC, id DESC
+          LIMIT 1
+        `);
+        latestStmt.bind([transaction.customer_id]);
+        const latest = this.fetchOne<{ transaction_id: string }>(latestStmt);
+
+        if (!latest || latest.transaction_id !== transactionId) {
+          throw new Error('Only the most recent transaction for the customer can be unvoided');
+        }
+
+        const customerStmt = db.prepare(
+          'SELECT * FROM customers WHERE customer_id = ?'
+        );
+        customerStmt.bind([transaction.customer_id]);
+        const customer = this.fetchOne<Customer>(customerStmt);
+
+        if (!customer) {
+          throw new Error('Customer not found');
+        }
+
+        const currentBalance = this.roundCurrency(customer.balance);
+        const amount = this.roundCurrency(transaction.amount);
+        let newBalance = this.roundCurrency(currentBalance + amount);
+        if (newBalance < 0 && newBalance > -0.01) {
+          newBalance = 0;
+        }
+
+        if (newBalance < 0) {
+          throw new Error('Insufficient balance to restore this transaction');
+        }
+
+        const updateCustomerStmt = db.prepare(`
+          UPDATE customers
+          SET balance = ?, updated_at = datetime('now')
+          WHERE customer_id = ?
+        `);
+        updateCustomerStmt.bind([newBalance, transaction.customer_id]);
+        updateCustomerStmt.step();
+        updateCustomerStmt.free();
+
+        const unvoidNote = note?.trim() && note.trim().length > 0 ? note.trim() : null;
+        const unvoidStmt = db.prepare(`
+          UPDATE transactions
+          SET voided = 0,
+              voided_at = NULL,
+              void_note = ?
+          WHERE transaction_id = ?
+        `);
+        unvoidStmt.bind([unvoidNote, transactionId]);
+        unvoidStmt.step();
+        unvoidStmt.free();
+
+        const refreshedStmt = db.prepare('SELECT * FROM transactions WHERE transaction_id = ?');
+        refreshedStmt.bind([transactionId]);
+        const refreshedRow = this.fetchOne<Transaction>(refreshedStmt);
+
+        const updatedTransaction = refreshedRow
+          ? this.hydrateTransaction(refreshedRow)
+          : { ...transaction, voided: false, void_note: unvoidNote, voided_at: null };
+
+        db.run('COMMIT');
+        this.invalidateTransactionStatsCache();
+
+        return {
+          transaction: updatedTransaction,
+          customerId: transaction.customer_id,
+          newBalance,
+        };
+      } catch (error) {
+        db.run('ROLLBACK');
+        throw error;
       }
-
-      const transaction = this.hydrateTransaction(transactionRow);
-
-      if (!transaction.voided) {
-        throw new Error('This transaction is not voided');
-      }
-
-      if (transaction.type !== 'purchase' && transaction.type !== 'deposit') {
-        throw new Error('Only purchase or deposit transactions can be unvoided');
-      }
-
-      const latestStmt = db.prepare(`
-        SELECT transaction_id
-        FROM transactions
-        WHERE customer_id = ?
-        ORDER BY timestamp DESC, id DESC
-        LIMIT 1
-      `);
-      latestStmt.bind([transaction.customer_id]);
-      const latest = this.fetchOne<{ transaction_id: string }>(latestStmt);
-      latestStmt.free();
-
-      if (!latest || latest.transaction_id !== transactionId) {
-        throw new Error('Only the most recent transaction for the customer can be unvoided');
-      }
-
-      const customerStmt = db.prepare(
-        'SELECT * FROM customers WHERE customer_id = ?'
-      );
-      customerStmt.bind([transaction.customer_id]);
-      const customer = this.fetchOne<Customer>(customerStmt);
-      customerStmt.free();
-
-      if (!customer) {
-        throw new Error('Customer not found');
-      }
-
-      const currentBalance = this.roundCurrency(customer.balance);
-      const amount = this.roundCurrency(transaction.amount);
-      let newBalance = this.roundCurrency(currentBalance + amount);
-      if (newBalance < 0 && newBalance > -0.01) {
-        newBalance = 0;
-      }
-
-      if (newBalance < 0) {
-        throw new Error('Insufficient balance to restore this transaction');
-      }
-
-      const updateCustomerStmt = db.prepare(`
-        UPDATE customers
-        SET balance = ?, updated_at = datetime('now')
-        WHERE customer_id = ?
-      `);
-      updateCustomerStmt.bind([newBalance, transaction.customer_id]);
-      updateCustomerStmt.step();
-      updateCustomerStmt.free();
-
-      const unvoidNote = note?.trim() && note.trim().length > 0 ? note.trim() : null;
-      const unvoidStmt = db.prepare(`
-        UPDATE transactions
-        SET voided = 0,
-            voided_at = NULL,
-            void_note = ?
-        WHERE transaction_id = ?
-      `);
-      unvoidStmt.bind([unvoidNote, transactionId]);
-      unvoidStmt.step();
-      unvoidStmt.free();
-
-      const refreshedStmt = db.prepare('SELECT * FROM transactions WHERE transaction_id = ?');
-      refreshedStmt.bind([transactionId]);
-      const refreshedRow = this.fetchOne<Transaction>(refreshedStmt);
-      refreshedStmt.free();
-
-      const updatedTransaction = refreshedRow
-        ? this.hydrateTransaction(refreshedRow)
-        : { ...transaction, voided: false, void_note: unvoidNote, voided_at: null };
-
-      return {
-        transaction: updatedTransaction,
-        customerId: transaction.customer_id,
-        newBalance,
-      };
     }, true);
   }
 
@@ -2987,8 +3538,9 @@ class DatabaseManager {
         throw new Error('Product name is required');
       }
 
-      const nextPrice =
+      const rawPrice =
         updates.price !== undefined ? updates.price : existing.price;
+      const nextPrice = this.roundCurrency(Number(rawPrice));
       if (!Number.isFinite(nextPrice) || nextPrice <= 0) {
         throw new Error('Product price must be a positive number');
       }

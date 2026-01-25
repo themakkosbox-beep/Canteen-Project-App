@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import DatabaseManager from '@/lib/database';
 import { serializeProduct } from '../../products/serializer';
+import { requireAdminAccess } from '@/lib/admin-auth';
 
 export const runtime = 'nodejs';
 
@@ -44,6 +45,11 @@ export async function GET() {
 
 export async function PUT(request: NextRequest) {
   try {
+    const auth = await requireAdminAccess(request);
+    if (auth) {
+      return auth;
+    }
+
     const body = await request.json();
     const productIds: unknown = body?.productIds;
 

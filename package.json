@@ -1,13 +1,12 @@
 {
   "name": "camp-canteen-pos",
-  "version": "1.3.2",
+  "version": "2.0.0",
   "description": "Camp Canteen POS System with prepaid accounts and barcode scanning",
   "main": "index.js",
   "scripts": {
     "dev": "next dev",
     "gen:changelog": "node scripts/generate-changelog.js",
     "build": "npm run gen:changelog && next build",
-    "prebuild": "npm run gen:changelog",
     "start": "next start",
     "lint": "next lint",
     "db:setup": "node scripts/setup-db.js",
@@ -16,9 +15,6 @@
   "dependencies": {
     "@headlessui/react": "^2.2.9",
     "@heroicons/react": "^2.2.0",
-    "@types/node": "^20.0.0",
-    "@types/react": "^18.0.0",
-    "@types/react-dom": "^18.0.0",
     "autoprefixer": "^10.4.16",
     "fuse.js": "^7.1.0",
     "next": "^14.0.0",
@@ -30,6 +26,9 @@
     "typescript": "^5.0.0"
   },
   "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/react": "^18.0.0",
+    "@types/react-dom": "^18.0.0",
     "@types/sql.js": "^1.4.9",
     "eslint": "^8.0.0",
     "eslint-config-next": "^14.0.0"

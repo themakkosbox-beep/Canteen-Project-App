@@ -18,6 +18,7 @@ import {
   TransactionLog,
   TransactionOptionSelection,
 } from '@/types/database';
+import { getAdminCode } from '@/lib/admin-session';
 
 interface POSState {
   currentCustomer: Customer | null;
@@ -347,6 +348,8 @@ const calculatePurchasePreview = (
   applyFlat('Product discount', product.discount_flat ?? 0);
   applyPercent('Customer discount', customer?.discount_percent ?? 0);
   applyFlat('Customer discount', customer?.discount_flat ?? 0);
+  applyPercent('Customer type discount', customer?.type_discount_percent ?? 0);
+  applyFlat('Customer type discount', customer?.type_discount_flat ?? 0);
 
   const finalTotal = roundCurrency(Math.max(0, current));
 
@@ -444,6 +447,9 @@ export default function POSPage() {
   );
 
   const entryInputRef = useRef<HTMLInputElement>(null);
+  const customerIdInputRef = useRef<HTMLInputElement>(null);
+  const depositInputRef = useRef<HTMLInputElement>(null);
+  const adjustmentInputRef = useRef<HTMLInputElement>(null);
 
   const currencyFormatter = useMemo(
     () => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }),
@@ -664,6 +670,62 @@ export default function POSPage() {
       entryInputRef.current.focus();
     }
   }, [state.currentCustomer]);
+
+  useEffect(() => {
+    const isEditableTarget = (target: EventTarget | null) => {
+      if (!target || !(target instanceof HTMLElement)) {
+        return false;
+      }
+      if (target.isContentEditable) {
+        return true;
+      }
+      const tagName = target.tagName.toLowerCase();
+      return tagName === 'input' || tagName === 'textarea' || tagName === 'select';
+    };
+
+    const focusWithSelection = (ref: React.RefObject<HTMLInputElement>) => {
+      if (!ref.current) {
+        return;
+      }
+      ref.current.focus();
+      ref.current.select();
+    };
+
+    const handleKeydown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || isEditableTarget(event.target)) {
+        return;
+      }
+
+      if (!event.shiftKey || !(event.ctrlKey || event.metaKey)) {
+        return;
+      }
+
+      switch (event.key) {
+        case '1':
+          event.preventDefault();
+          focusWithSelection(customerIdInputRef);
+          break;
+        case '2':
+          event.preventDefault();
+          focusWithSelection(entryInputRef);
+          break;
+        case '3':
+          event.preventDefault();
+          focusWithSelection(depositInputRef);
+          break;
+        case '4':
+          event.preventDefault();
+          setShowAdjustmentForm(true);
+          window.setTimeout(() => focusWithSelection(adjustmentInputRef), 0);
+          break;
+        default:
+          break;
+      }
+    };
+
+    window.addEventListener('keydown', handleKeydown);
+    return () => window.removeEventListener('keydown', handleKeydown);
+  }, [setShowAdjustmentForm]);
 
   useEffect(() => {
     const interval = window.setInterval(() => setCurrentTime(new Date()), 1000);
@@ -1652,7 +1714,18 @@ export default function POSPage() {
 
     setExportingCsv(true);
     try {
-      const response = await fetch('/api/transactions/export');
+      const adminCode = getAdminCode();
+      const response = await fetch('/api/transactions/export', {
+        headers: adminCode ? { 'x-admin-code': adminCode } : undefined,
+      });
+      if (response.status === 401) {
+        const payload = await response.json().catch(() => ({}));
+        const message =
+          typeof (payload as { error?: string })?.error === 'string'
+            ? (payload as { error?: string }).error
+            : 'Admin code required to export transactions';
+        throw new Error(message);
+      }
       if (!response.ok) {
         const contentType = response.headers.get('content-type') ?? '';
         if (contentType.includes('application/json')) {
@@ -1753,9 +1826,12 @@ export default function POSPage() {
       }),
     [currentTime]
   );
+  const shellClassName = trainingMode
+    ? 'flex min-h-screen flex-col bg-amber-50'
+    : 'flex min-h-screen flex-col bg-gray-50';
 
   return (
-    <div className="flex min-h-screen flex-col bg-gray-50">
+    <div className={shellClassName}>
       <header className="border-b border-gray-200 bg-white">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
           <div>
@@ -1788,7 +1864,12 @@ export default function POSPage() {
           </div>
         </div>
       </header>
-  <main className="flex w-full flex-1 flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8">
+      {trainingMode ? (
+        <div className="border-b border-amber-200 bg-amber-100/60 px-6 py-3 text-sm text-amber-900">
+          <span className="font-semibold">Training mode is active.</span> Transactions are simulated and do not affect the live database.
+        </div>
+      ) : null}
+      <main className="flex w-full flex-1 flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8">
         {appSettingsError ? (
           <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
             {appSettingsError}
@@ -1868,6 +1949,7 @@ export default function POSPage() {
                         }
                       }}
                       placeholder="Enter 4-digit ID"
+                      ref={customerIdInputRef}
                       value={customerIdInput}
                     />
                     <button
@@ -1973,6 +2055,9 @@ export default function POSPage() {
                   </div>
                 </div>
               </div>
+              <p className="mt-3 text-xs text-gray-500">
+                Shortcuts: Ctrl+Shift+1 customer lookup, Ctrl+Shift+2 scan/search, Ctrl+Shift+3 deposit, Ctrl+Shift+4 adjustment.
+              </p>
 
               {productsLoading ? (
                 <div className="mt-4 rounded-lg border border-dashed border-gray-300 p-4 text-center text-gray-500">
@@ -2078,6 +2163,7 @@ export default function POSPage() {
                       id="deposit"
                       onChange={(event) => setDepositAmount(event.target.value)}
                       placeholder="Enter amount"
+                      ref={depositInputRef}
                       type="number"
                       value={depositAmount}
                     />
@@ -2113,6 +2199,7 @@ export default function POSPage() {
                           id="adjustment"
                           onChange={(event) => setAdjustmentAmount(event.target.value)}
                           placeholder="Positive or negative amount"
+                          ref={adjustmentInputRef}
                           type="number"
                           value={adjustmentAmount}
                         />
@@ -2217,7 +2304,7 @@ export default function POSPage() {
                   onClick={exportTransactionsToCsv}
                   type="button"
                 >
-                  {exportingCsv ? 'Preparing CSV…' : 'Export All Transactions'}
+                  {exportingCsv ? 'Preparing CSV...' : 'Export All Transactions'}
                 </button>
               </div>
               <p className="mt-1 text-xs text-gray-500">
@@ -2231,7 +2318,7 @@ export default function POSPage() {
 
               {!trainingMode && globalDiscountActive ? (
                 <p className="mt-2 text-xs font-semibold text-camp-700">
-                  Global discount is active—recent totals already include the automatic adjustment.
+                  Global discount is active - recent totals already include the automatic adjustment.
                 </p>
               ) : null}
 
@@ -2354,7 +2441,7 @@ export default function POSPage() {
                                 onClick={() => handleDeleteTransaction(transaction)}
                                 type="button"
                               >
-                                {isDeleting ? 'Removing…' : 'Void'}
+                                {isDeleting ? 'Removing...' : 'Void'}
                               </button>
                             ) : null}
                             {canUnvoid ? (
@@ -2364,7 +2451,7 @@ export default function POSPage() {
                                 onClick={() => handleUnvoidTransaction(transaction)}
                                 type="button"
                               >
-                                {isUnvoiding ? 'Restoring…' : 'Unvoid'}
+                                {isUnvoiding ? 'Restoring...' : 'Unvoid'}
                               </button>
                             ) : null}
                           </div>
@@ -2567,7 +2654,7 @@ export default function POSPage() {
                     type="button"
                   >
                     {optionModalState.submitting
-                      ? 'Charging…'
+                      ? 'Charging...'
                       : `Charge ${formatCurrency(optionEstimatedTotal)}`}
                   </button>
                 </div>
@@ -2782,7 +2869,7 @@ export default function POSPage() {
                     onClick={() => void handleEditModalSubmit()}
                     type="button"
                   >
-                    {editModalState.submitting ? 'Saving…' : 'Save Changes'}
+                    {editModalState.submitting ? 'Saving...' : 'Save Changes'}
                   </button>
                 </div>
               </>
@@ -2861,7 +2948,7 @@ export default function POSPage() {
                       onClick={() => void handleBalanceEditSubmit()}
                       type="button"
                     >
-                      {balanceEditModalState.submitting ? 'Saving…' : 'Save Changes'}
+                      {balanceEditModalState.submitting ? 'Saving...' : 'Save Changes'}
                     </button>
                   </div>
                 </div>

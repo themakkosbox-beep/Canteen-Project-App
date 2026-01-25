@@ -7,6 +7,7 @@ import type {
   ProductOptionGroup,
   QuickKeySlot,
 } from '@/types/database';
+import { getAdminCode, setAdminCode } from '@/lib/admin-session';
 
 interface CustomerFormState {
   customerId: string;
@@ -41,6 +42,7 @@ interface ProductOptionGroupState {
 }
 
 const QUICK_KEY_COUNT = 6;
+const ADMIN_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
 
 const createEmptyQuickKeySlots = (): QuickKeySlot[] =>
   Array.from({ length: QUICK_KEY_COUNT }, (_, index) => ({
@@ -89,6 +91,10 @@ export default function AdminPage() {
   const [loadingQuickKeys, setLoadingQuickKeys] = useState(true);
   const [savingQuickKeys, setSavingQuickKeys] = useState(false);
   const [exportingTransactions, setExportingTransactions] = useState(false);
+  const [requiresAdminCode, setRequiresAdminCode] = useState(false);
+  const [adminCodeInput, setAdminCodeInput] = useState('');
+  const [adminCodeError, setAdminCodeError] = useState<string | null>(null);
+  const [unlockingAdmin, setUnlockingAdmin] = useState(false);
 
   const [customerForm, setCustomerForm] = useState<CustomerFormState>({
     customerId: '',
@@ -118,6 +124,98 @@ export default function AdminPage() {
     }
     return;
   }, [success]);
+
+  const buildAdminHeaders = useCallback(() => {
+    const code = getAdminCode();
+    return code ? { 'x-admin-code': code } : {};
+  }, []);
+
+  const handleAdminAuthFailure = useCallback(async (response: Response) => {
+    if (response.status !== 401) {
+      return false;
+    }
+
+    const payload = await response.json().catch(() => ({}));
+    if ((payload as { adminCodeRequired?: boolean })?.adminCodeRequired) {
+      setRequiresAdminCode(true);
+      setAdminCode(null);
+      setAdminCodeError(
+        typeof (payload as { error?: string })?.error === 'string'
+          ? (payload as { error?: string }).error
+          : 'Admin code required to continue.'
+      );
+      return true;
+    }
+
+    return false;
+  }, []);
+
+  const handleAdminUnlock = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const candidate = adminCodeInput.trim();
+    if (!candidate) {
+      setAdminCodeError('Enter the admin code to continue.');
+      return;
+    }
+
+    setUnlockingAdmin(true);
+    setAdminCode(candidate);
+    setAdminCodeError(null);
+
+    try {
+      await Promise.all([loadCustomers(), loadProducts(), loadQuickKeys()]);
+      if (!getAdminCode()) {
+        throw new Error('Admin code required');
+      }
+      setRequiresAdminCode(false);
+      setAdminCodeInput('');
+    } catch {
+      setAdminCode(candidate);
+      setAdminCodeError('Unable to verify admin code. Please try again.');
+    } finally {
+      setUnlockingAdmin(false);
+    }
+  };
+
+  useEffect(() => {
+    if (requiresAdminCode || !getAdminCode()) {
+      return;
+    }
+
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+    const lockAdmin = () => {
+      setAdminCode(null);
+      setRequiresAdminCode(true);
+      setAdminCodeError('Admin session timed out. Enter the admin code to continue.');
+    };
+
+    const resetTimer = () => {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+      timeoutId = setTimeout(lockAdmin, ADMIN_IDLE_TIMEOUT_MS);
+    };
+
+    const handleVisibility = () => {
+      if (document.hidden) {
+        lockAdmin();
+      }
+    };
+
+    resetTimer();
+    const events = ['mousemove', 'mousedown', 'keydown', 'touchstart', 'scroll'];
+    events.forEach((eventName) => window.addEventListener(eventName, resetTimer, { passive: true }));
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    return () => {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+      events.forEach((eventName) => window.removeEventListener(eventName, resetTimer));
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [requiresAdminCode, setAdminCodeError, setRequiresAdminCode]);
 
   useEffect(() => {
     setQuickKeySlots((previous) =>
@@ -150,7 +248,12 @@ export default function AdminPage() {
       if (customerSearch.trim().length > 0) {
         params.set('search', customerSearch.trim());
       }
-      const response = await fetch(`/api/customers?${params.toString()}`);
+      const response = await fetch(`/api/customers?${params.toString()}`, {
+        headers: buildAdminHeaders(),
+      });
+      if (await handleAdminAuthFailure(response)) {
+        return;
+      }
       if (!response.ok) {
         throw new Error('Unable to load customers');
       }
@@ -158,11 +261,11 @@ export default function AdminPage() {
       setCustomers(data);
     } catch (err) {
       console.error(err);
-  setError('Failed to load customers');
+      setError('Failed to load customers');
     } finally {
       setLoadingCustomers(false);
     }
-  }, [customerSearch]);
+  }, [buildAdminHeaders, customerSearch, handleAdminAuthFailure]);
 
   const handleQuickKeyChange = (index: number, nextProductId: string) => {
     setQuickKeySlots((previous) => {
@@ -209,9 +312,13 @@ export default function AdminPage() {
     try {
       const response = await fetch('/api/settings/quick-keys', {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...buildAdminHeaders() },
         body: JSON.stringify({ productIds: quickKeySlots.map((slot) => slot.productId) }),
       });
+
+      if (await handleAdminAuthFailure(response)) {
+        return;
+      }
 
       const contentType = response.headers.get('content-type') ?? '';
       const isJson = contentType.includes('application/json');
@@ -287,7 +394,12 @@ export default function AdminPage() {
   const exportTransactionsToCsv = async () => {
     setExportingTransactions(true);
     try {
-      const response = await fetch('/api/transactions/export');
+      const response = await fetch('/api/transactions/export', {
+        headers: buildAdminHeaders(),
+      });
+      if (await handleAdminAuthFailure(response)) {
+        return;
+      }
       if (!response.ok) {
         const contentType = response.headers.get('content-type') ?? '';
         if (contentType.includes('application/json')) {
@@ -333,7 +445,12 @@ export default function AdminPage() {
         params.set('category', productCategoryFilter);
       }
 
-      const response = await fetch(`/api/products?${params.toString()}`);
+      const response = await fetch(`/api/products?${params.toString()}`, {
+        headers: buildAdminHeaders(),
+      });
+      if (await handleAdminAuthFailure(response)) {
+        return;
+      }
       if (!response.ok) {
         throw new Error('Unable to load products');
       }
@@ -345,12 +462,17 @@ export default function AdminPage() {
     } finally {
       setLoadingProducts(false);
     }
-  }, [includeInactiveProducts, productCategoryFilter, productSearch]);
+  }, [buildAdminHeaders, handleAdminAuthFailure, includeInactiveProducts, productCategoryFilter, productSearch]);
 
   const loadQuickKeys = useCallback(async () => {
     setLoadingQuickKeys(true);
     try {
-      const response = await fetch('/api/settings/quick-keys');
+      const response = await fetch('/api/settings/quick-keys', {
+        headers: buildAdminHeaders(),
+      });
+      if (await handleAdminAuthFailure(response)) {
+        return;
+      }
       if (!response.ok) {
         throw new Error('Unable to load quick key settings');
       }
@@ -392,7 +514,7 @@ export default function AdminPage() {
     } finally {
       setLoadingQuickKeys(false);
     }
-  }, []);
+  }, [buildAdminHeaders, handleAdminAuthFailure]);
 
   const loadProductCategories = useCallback(async () => {
     try {
@@ -457,9 +579,13 @@ export default function AdminPage() {
       if (editingCustomerId) {
         const response = await fetch(`/api/customers/${editingCustomerId}`, {
           method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...buildAdminHeaders() },
           body: JSON.stringify({ name: trimmedName }),
         });
+
+        if (await handleAdminAuthFailure(response)) {
+          return;
+        }
 
         if (!response.ok) {
           const message = await response.json();
@@ -470,13 +596,17 @@ export default function AdminPage() {
       } else {
         const response = await fetch('/api/customers', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...buildAdminHeaders() },
           body: JSON.stringify({
             customerId: trimmedId,
             name: trimmedName,
             initialBalance: parsedBalance,
           }),
         });
+
+        if (await handleAdminAuthFailure(response)) {
+          return;
+        }
 
         if (!response.ok) {
           const message = await response.json();
@@ -486,7 +616,7 @@ export default function AdminPage() {
         setSuccess('Customer created successfully');
       }
 
-  setCustomerForm({ customerId: '', name: '', initialBalance: '' });
+      setCustomerForm({ customerId: '', name: '', initialBalance: '' });
       setEditingCustomerId(null);
       await loadCustomers();
     } catch (err) {
@@ -601,9 +731,13 @@ export default function AdminPage() {
       if (editingProductId) {
         const response = await fetch(`/api/products/${editingProductId}`, {
           method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...buildAdminHeaders() },
           body: JSON.stringify(basePayload),
         });
+
+        if (await handleAdminAuthFailure(response)) {
+          return;
+        }
 
         if (!response.ok) {
           const message = await response.json();
@@ -614,12 +748,16 @@ export default function AdminPage() {
       } else {
         const response = await fetch('/api/products', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...buildAdminHeaders() },
           body: JSON.stringify({
             ...basePayload,
             productId: productForm.productId.trim() || undefined,
           }),
         });
+
+        if (await handleAdminAuthFailure(response)) {
+          return;
+        }
 
         if (!response.ok) {
           const message = await response.json();
@@ -820,7 +958,7 @@ export default function AdminPage() {
       return `${index + 1}. ${failure.error} (${serialized})`;
     });
 
-    const suffix = failures.length > 3 ? ` …and ${failures.length - 3} more.` : '';
+    const suffix = failures.length > 3 ? ` ...and ${failures.length - 3} more.` : '';
     return `${prefix} ${preview.join(' ')}` + suffix;
   };
 
@@ -834,7 +972,7 @@ export default function AdminPage() {
       .map((line) => line.trim())
       .filter((line) => line.length > 0);
 
-    const draftEntries: { customerId: string; name?: string; initialBalance?: number }[] = [];
+    const draftEntries: { customerId: string; name: string; initialBalance?: number }[] = [];
     const localFailures: { input: unknown; error: string }[] = [];
 
     lines.forEach((line, index) => {
@@ -848,7 +986,14 @@ export default function AdminPage() {
         return;
       }
 
-      const name = rawName?.trim()?.length ? rawName.trim() : undefined;
+      const name = rawName?.trim()?.length ? rawName.trim() : '';
+      if (!name) {
+        localFailures.push({
+          input: line,
+          error: `Line ${index + 1}: name is required.`,
+        });
+        return;
+      }
       let initialBalance: number | undefined;
       if (rawBalance && rawBalance.trim().length) {
         const parsed = Number.parseFloat(rawBalance.trim());
@@ -874,9 +1019,13 @@ export default function AdminPage() {
     try {
       const response = await fetch('/api/customers/bulk', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...buildAdminHeaders() },
         body: JSON.stringify({ customers: draftEntries }),
       });
+
+      if (await handleAdminAuthFailure(response)) {
+        return;
+      }
 
       const result = await response.json();
 
@@ -965,9 +1114,13 @@ export default function AdminPage() {
     try {
       const response = await fetch('/api/products/bulk', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...buildAdminHeaders() },
         body: JSON.stringify({ products: draftEntries }),
       });
+
+      if (await handleAdminAuthFailure(response)) {
+        return;
+      }
 
       const result = await response.json();
 
@@ -1027,7 +1180,7 @@ export default function AdminPage() {
     }
 
     if (pieces.length === 0) {
-      return '—';
+      return '-';
     }
 
     return pieces.join(' + ');
@@ -1036,7 +1189,7 @@ export default function AdminPage() {
   const summarizeOptionGroups = (product: Product): string => {
     const groups = product.options ?? [];
     if (groups.length === 0) {
-      return '—';
+      return '-';
     }
 
     const requiredCount = groups.filter((group) => group.required).length;
@@ -1084,17 +1237,50 @@ export default function AdminPage() {
           </div>
         )}
 
-        <section className="bg-white rounded-lg shadow p-6 space-y-6">
-          <div>
-            <h2 className="text-xl font-semibold mb-2">
-              {editingCustomerId ? 'Edit Customer' : 'Create Customer'}
-            </h2>
-            <p className="text-sm text-gray-600">
-              {editingCustomerId
-                ? 'Update customer details and save changes.'
-                : 'Use the registration form to assign a 4-digit ID and optional starting balance.'}
-            </p>
-          </div>
+        {requiresAdminCode ? (
+          <section className="rounded-lg bg-white p-8 shadow text-center space-y-4">
+            <div>
+              <h2 className="text-xl font-semibold text-gray-900">Admin Access Required</h2>
+              <p className="text-sm text-gray-600 mt-1">
+                Enter the admin code to manage customers, products, and quick keys.
+              </p>
+            </div>
+            <form className="mx-auto max-w-sm space-y-3" onSubmit={handleAdminUnlock}>
+              <input
+                type="password"
+                value={adminCodeInput}
+                onChange={(event) => setAdminCodeInput(event.target.value)}
+                className="pos-input w-full text-center tracking-widest"
+                placeholder="Enter Admin Code"
+                disabled={unlockingAdmin}
+              />
+              {adminCodeError ? (
+                <p className="text-sm text-red-600 bg-red-50 py-1 px-2 rounded">
+                  {adminCodeError}
+                </p>
+              ) : null}
+              <button
+                type="submit"
+                className="pos-button w-full justify-center"
+                disabled={unlockingAdmin || adminCodeInput.trim().length === 0}
+              >
+                {unlockingAdmin ? 'Verifying...' : 'Unlock Admin'}
+              </button>
+            </form>
+          </section>
+        ) : (
+          <>
+            <section className="bg-white rounded-lg shadow p-6 space-y-6">
+              <div>
+                <h2 className="text-xl font-semibold mb-2">
+                  {editingCustomerId ? 'Edit Customer' : 'Create Customer'}
+                </h2>
+                <p className="text-sm text-gray-600">
+                  {editingCustomerId
+                    ? 'Update customer details and save changes.'
+                    : 'Use the registration form to assign a 4-digit ID and optional starting balance.'}
+                </p>
+              </div>
           <form
             onSubmit={handleCustomerSubmit}
             className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end"
@@ -1131,7 +1317,7 @@ export default function AdminPage() {
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700">Initial Balance</label>
-              <p className="text-xs text-gray-500 mt-1">Optional—defaults to 0.00 for new accounts.</p>
+              <p className="text-xs text-gray-500 mt-1">Optional - defaults to 0.00 for new accounts.</p>
               <input
                 type="number"
                 min="0"
@@ -1188,7 +1374,7 @@ export default function AdminPage() {
               ) : null}
             </div>
             {loadingCustomers ? (
-              <p className="text-gray-500">Loading customers…</p>
+              <p className="text-gray-500">Loading customers...</p>
             ) : customers.length === 0 ? (
               <p className="text-gray-500">No customers registered yet.</p>
             ) : (
@@ -1207,7 +1393,7 @@ export default function AdminPage() {
                     {customers.map((customer) => (
                       <tr key={customer.customer_id} className="border-b border-gray-100">
                         <td className="py-2 px-2 font-semibold">#{customer.customer_id}</td>
-                        <td className="py-2 px-2">{customer.name ?? '—'}</td>
+                        <td className="py-2 px-2">{customer.name ?? '-'}</td>
                         <td className="py-2 px-2 text-right">
                           {currencyFormatter.format(customer.balance)}
                         </td>
@@ -1264,7 +1450,7 @@ export default function AdminPage() {
                     className="pos-button"
                     disabled={bulkCustomerLoading || bulkCustomerInput.trim().length === 0}
                   >
-                    {bulkCustomerLoading ? 'Importing…' : 'Import Customers'}
+                    {bulkCustomerLoading ? 'Importing...' : 'Import Customers'}
                   </button>
                   <button
                     type="button"
@@ -1421,7 +1607,7 @@ export default function AdminPage() {
               </div>
               {productForm.options.length === 0 ? (
                 <p className="rounded-lg border border-dashed border-gray-300 p-4 text-sm text-gray-500">
-                  No option groups yet. Add one to support choices—perfect for meals like a chicken sandwich with different sides.
+                  No option groups yet. Add one to support choices - perfect for meals like a chicken sandwich with different sides.
                 </p>
               ) : (
                 <div className="space-y-4">
@@ -1590,7 +1776,7 @@ export default function AdminPage() {
               </div>
             </div>
             {loadingProducts ? (
-              <p className="text-gray-500">Loading products…</p>
+              <p className="text-gray-500">Loading products...</p>
             ) : products.length === 0 ? (
               <p className="text-gray-500">No products created yet.</p>
             ) : (
@@ -1621,8 +1807,8 @@ export default function AdminPage() {
                         </td>
                         <td className="py-2 px-2">{describeProductDiscount(product)}</td>
                         <td className="py-2 px-2">{summarizeOptionGroups(product)}</td>
-                        <td className="py-2 px-2">{product.barcode ?? '—'}</td>
-                        <td className="py-2 px-2">{product.category ?? '—'}</td>
+                        <td className="py-2 px-2">{product.barcode ?? '-'}</td>
+                        <td className="py-2 px-2">{product.category ?? '-'}</td>
                         <td className="py-2 px-2">
                           {product.active ? (
                             <span className="inline-flex items-center gap-1 text-green-600 text-xs font-semibold uppercase">
@@ -1689,7 +1875,7 @@ export default function AdminPage() {
                     className="pos-button"
                     disabled={bulkProductLoading || bulkProductInput.trim().length === 0}
                   >
-                    {bulkProductLoading ? 'Importing…' : 'Import Products'}
+                    {bulkProductLoading ? 'Importing...' : 'Import Products'}
                   </button>
                   <button
                     type="button"
@@ -1728,12 +1914,12 @@ export default function AdminPage() {
                 className="pos-button"
                 disabled={savingQuickKeys || loadingQuickKeys}
               >
-                {savingQuickKeys ? 'Saving…' : 'Save Quick Keys'}
+                {savingQuickKeys ? 'Saving...' : 'Save Quick Keys'}
               </button>
             </div>
           </div>
           {loadingQuickKeys ? (
-            <p className="text-gray-500">Loading quick key slots…</p>
+            <p className="text-gray-500">Loading quick key slots...</p>
           ) : (
             <div className="grid gap-4 md:grid-cols-3 xl:grid-cols-6">
               {quickKeySlots.map((slot) => (
@@ -1757,7 +1943,7 @@ export default function AdminPage() {
                     className="pos-input w-full"
                     disabled={savingQuickKeys}
                   >
-                    <option value="">Choose a product…</option>
+                    <option value="">Choose a product...</option>
                     {quickKeyOptions.map((product) => (
                       <option key={product.product_id} value={product.product_id}>
                         {product.name} ({currencyFormatter.format(product.price)})
@@ -1776,7 +1962,7 @@ export default function AdminPage() {
                         ) : null}
                       </div>
                     ) : slot.productId ? (
-                      <p>Product not found—double-check that it still exists.</p>
+                      <p>Product not found - double-check that it still exists.</p>
                     ) : (
                       <p>Select a product to assign this quick key.</p>
                     )}
@@ -1813,7 +1999,7 @@ export default function AdminPage() {
                 className="pos-button w-full md:w-auto"
                 disabled={exportingTransactions}
               >
-                {exportingTransactions ? 'Preparing…' : 'Download CSV'}
+                {exportingTransactions ? 'Preparing...' : 'Download CSV'}
               </button>
             </div>
             <div className="rounded-lg border border-gray-200 p-4 space-y-3">
@@ -1824,7 +2010,7 @@ export default function AdminPage() {
                 </p>
               </div>
               <p className="text-xs text-gray-500">
-                Need a sanity check? Open the Canteen data directory to confirm the latest timestamped archive.
+                Need a sanity check... Open the Canteen data directory to confirm the latest timestamped archive.
               </p>
             </div>
           </div>
@@ -1833,6 +2019,8 @@ export default function AdminPage() {
         <footer className="text-xs text-gray-500 text-center pb-2">
           Run <code className="font-mono bg-gray-100 px-1 py-0.5 rounded">npm run test:e2e</code> before packaging a release to confirm database writes end-to-end.
         </footer>
+        </>
+      )}
       </div>
     </div>
   );

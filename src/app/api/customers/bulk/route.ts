@@ -1,5 +1,6 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import DatabaseManager, { BulkCustomerInput } from "@/lib/database";
+import { requireAdminAccess } from "@/lib/admin-auth";
 
 interface BulkCustomerPayload {
   customers?: unknown;
@@ -10,8 +11,13 @@ interface BulkFailure<T> {
   error: string;
 }
 
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
   try {
+    const auth = await requireAdminAccess(request);
+    if (auth) {
+      return auth;
+    }
+
     const body = (await request.json()) as BulkCustomerPayload;
     const rawEntries = Array.isArray(body.customers) ? body.customers : [];
 

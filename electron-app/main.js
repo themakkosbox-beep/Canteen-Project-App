@@ -25,7 +25,7 @@ function applyApplicationMenu(_mainWindow, options = {}) {
 
   const helpSubmenu = [
     {
-      label: checkingForUpdates ? 'Checking for Updates…' : 'Check for Updates…',
+      label: checkingForUpdates ? 'Checking for Updates...' : 'Check for Updates...',
       enabled: !checkingForUpdates,
       click: () => onCheckForUpdates(),
     },
@@ -33,7 +33,7 @@ function applyApplicationMenu(_mainWindow, options = {}) {
 
   if (updateReady) {
     helpSubmenu.push({
-      label: 'Install Downloaded Update…',
+      label: 'Install Downloaded Update...',
       click: () => onInstallUpdate(),
     });
   }

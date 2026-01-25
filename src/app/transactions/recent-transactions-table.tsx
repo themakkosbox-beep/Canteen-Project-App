@@ -29,7 +29,7 @@ interface RecentTransactionsTableProps {
 const formatTimestamp = (iso: string) => {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) {
-    return '—';
+    return '-';
   }
   return date.toLocaleString();
 };
@@ -183,7 +183,7 @@ const RecentTransactionsTable: React.FC<RecentTransactionsTableProps> = ({ initi
           className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 hover:border-camp-500 disabled:opacity-60"
           disabled={refreshing}
         >
-          {refreshing ? 'Refreshing…' : 'Refresh'}
+          {refreshing ? 'Refreshing...' : 'Refresh'}
         </button>
       </div>
 
@@ -226,7 +226,7 @@ const RecentTransactionsTable: React.FC<RecentTransactionsTableProps> = ({ initi
                     <td className="whitespace-nowrap px-3 py-2 text-gray-700">{formatTimestamp(entry.timestamp)}</td>
                     <td className="px-3 py-2">
                       <div className="font-medium text-gray-800">
-                        {entry.customer_name ?? '—'}
+                        {entry.customer_name ?? '-'}
                       </div>
                       <div className="text-xs text-gray-500">ID: {entry.customer_id ?? 'n/a'}</div>
                     </td>
@@ -249,7 +249,7 @@ const RecentTransactionsTable: React.FC<RecentTransactionsTableProps> = ({ initi
                     <td className="px-3 py-2 text-right text-gray-700">
                       {currencyFormatter.format(entry.balance_after)}
                     </td>
-                    <td className="px-3 py-2 text-gray-600">{note ?? '—'}</td>
+                    <td className="px-3 py-2 text-gray-600">{note ?? '-'}</td>
                     <td className="px-3 py-2">
                       {canEditBalanceDelta ? (
                         <button
@@ -260,7 +260,7 @@ const RecentTransactionsTable: React.FC<RecentTransactionsTableProps> = ({ initi
                           Edit
                         </button>
                       ) : (
-                        <span className="text-xs text-gray-400">—</span>
+                        <span className="text-xs text-gray-400">-</span>
                       )}
                     </td>
                   </tr>
@@ -341,7 +341,7 @@ const RecentTransactionsTable: React.FC<RecentTransactionsTableProps> = ({ initi
                       disabled={balanceEditModalState.submitting}
                       onClick={() => void handleBalanceEditSubmit()}
                     >
-                      {balanceEditModalState.submitting ? 'Saving…' : 'Save Changes'}
+                      {balanceEditModalState.submitting ? 'Saving...' : 'Save Changes'}
                     </button>
                   </div>
                 </div>

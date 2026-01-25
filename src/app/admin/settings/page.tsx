@@ -11,7 +11,8 @@ import {
   NoSymbolIcon,
   ShieldCheckIcon,
 } from '@heroicons/react/24/outline';
-import type { AppSettingsPayload, TransactionStatsSummary } from '@/types/database';
+import type { AppSettingsPayload, TransactionStatsSummary, BackupStatus, BackupResult } from '@/types/database';
+import { getAdminCode, setAdminCode } from '@/lib/admin-session';
 
 interface SettingsFormState {
   brandName: string;
@@ -30,6 +31,8 @@ const defaultFormState: SettingsFormState = {
   currentAdminCode: '',
   clearAdminCode: false,
 };
+
+const ADMIN_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
 
 const formatNumberInput = (value: number | null | undefined): string => {
   if (typeof value !== 'number' || Number.isNaN(value)) {
@@ -59,7 +62,7 @@ const SettingsPage: React.FC = () => {
   const [success, setSuccess] = useState<string | null>(null);
   const [adminCodeSet, setAdminCodeSet] = useState(false);
   const [form, setForm] = useState<SettingsFormState>(defaultFormState);
-  const [adminSessionCode, setAdminSessionCode] = useState<string | null>(null);
+  const [adminSessionCode, setAdminSessionCode] = useState<string | null>(() => getAdminCode());
   const [requiresAdminCode, setRequiresAdminCode] = useState(false);
   const [unlockCode, setUnlockCode] = useState('');
   const [unlockError, setUnlockError] = useState<string | null>(null);
@@ -67,11 +70,29 @@ const SettingsPage: React.FC = () => {
   const [transactionStats, setTransactionStats] = useState<TransactionStatsSummary | null>(null);
   const [loadingStats, setLoadingStats] = useState(false);
   const [statsError, setStatsError] = useState<string | null>(null);
+  const [backupStatus, setBackupStatus] = useState<BackupStatus | null>(null);
+  const [loadingBackupStatus, setLoadingBackupStatus] = useState(false);
+  const [backupError, setBackupError] = useState<string | null>(null);
+  const [backupNotice, setBackupNotice] = useState<string | null>(null);
+  const [creatingBackup, setCreatingBackup] = useState(false);
+  const [restoringBackup, setRestoringBackup] = useState(false);
+  const [restoreFile, setRestoreFile] = useState<File | null>(null);
 
   const currencyFormatter = useMemo(
     () => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }),
     []
   );
+
+  const formatBackupTimestamp = (value: string | null) => {
+    if (!value) {
+      return 'Not available';
+    }
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return value;
+    }
+    return date.toLocaleString();
+  };
 
   const loadTransactionStats = useCallback(
     async (overrideCode?: string | null) => {
@@ -117,6 +138,50 @@ const SettingsPage: React.FC = () => {
     [adminSessionCode, requiresAdminCode]
   );
 
+  const loadBackupStatus = useCallback(
+    async (overrideCode?: string | null) => {
+      const candidate = (overrideCode ?? adminSessionCode ?? '').trim();
+      if (requiresAdminCode && !candidate) {
+        setBackupStatus(null);
+        setBackupError('Enter the admin code to view backup status.');
+        return;
+      }
+
+      setLoadingBackupStatus(true);
+      setBackupError(null);
+
+      try {
+        const response = await fetch('/api/backups', {
+          headers: candidate ? { 'x-admin-code': candidate } : undefined,
+        });
+
+        if (response.status === 401) {
+          setBackupStatus(null);
+          setBackupError('Admin code required to view backups.');
+          setRequiresAdminCode(true);
+          setAdminSessionCode(null);
+          setAdminCode(null);
+          setUnlockError('Admin code expired. Please enter it again to continue.');
+          return;
+        }
+
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({}));
+          throw new Error(payload?.error ?? 'Failed to load backup status');
+        }
+
+        const data: BackupStatus = await response.json();
+        setBackupStatus(data);
+      } catch (err) {
+        console.error(err);
+        setBackupError(err instanceof Error ? err.message : 'Failed to load backup status');
+      } finally {
+        setLoadingBackupStatus(false);
+      }
+    },
+    [adminSessionCode, requiresAdminCode]
+  );
+
   const loadSettings = useCallback(
     async (overrideCode?: string | null): Promise<boolean> => {
       setLoading(true);
@@ -137,6 +202,7 @@ const SettingsPage: React.FC = () => {
           if (payload?.adminCodeRequired) {
             setRequiresAdminCode(true);
             setAdminSessionCode(null);
+            setAdminCode(null);
             setTransactionStats(null);
             setStatsError('Enter the admin code to view transaction totals.');
             if (overrideCode !== undefined) {
@@ -167,9 +233,11 @@ const SettingsPage: React.FC = () => {
 
         setRequiresAdminCode(false);
         setAdminSessionCode(resolvedCode ? resolvedCode : null);
+        setAdminCode(resolvedCode || null);
         setUnlockCode('');
         setUnlockError(null);
         void loadTransactionStats(resolvedCode || null);
+        void loadBackupStatus(resolvedCode || null);
         return true;
       } catch (err) {
         console.error(err);
@@ -179,7 +247,7 @@ const SettingsPage: React.FC = () => {
         setLoading(false);
       }
     },
-    [adminSessionCode, loadTransactionStats]
+    [adminSessionCode, loadTransactionStats, loadBackupStatus]
   );
 
   useEffect(() => {
@@ -194,6 +262,47 @@ const SettingsPage: React.FC = () => {
     return () => clearTimeout(timeout);
   }, [success]);
 
+  useEffect(() => {
+    if (!adminSessionCode) {
+      return;
+    }
+
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+    const lockAdmin = () => {
+      setAdminSessionCode(null);
+      setAdminCode(null);
+      setRequiresAdminCode(true);
+      setUnlockError('Admin session timed out. Please enter it again to continue.');
+    };
+
+    const resetTimer = () => {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+      timeoutId = setTimeout(lockAdmin, ADMIN_IDLE_TIMEOUT_MS);
+    };
+
+    const handleVisibility = () => {
+      if (document.hidden) {
+        lockAdmin();
+      }
+    };
+
+    resetTimer();
+    const events = ['mousemove', 'mousedown', 'keydown', 'touchstart', 'scroll'];
+    events.forEach((eventName) => window.addEventListener(eventName, resetTimer, { passive: true }));
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    return () => {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+      events.forEach((eventName) => window.removeEventListener(eventName, resetTimer));
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [adminSessionCode, setRequiresAdminCode, setUnlockError]);
+
   const handleUnlock = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const candidate = unlockCode.trim();
@@ -205,6 +314,125 @@ const SettingsPage: React.FC = () => {
     setUnlocking(true);
     await loadSettings(candidate);
     setUnlocking(false);
+  };
+
+  const handleCopyPath = async () => {
+    if (!backupStatus?.dataDirectory) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(backupStatus.dataDirectory);
+      setBackupNotice('Data directory copied to clipboard.');
+    } catch (error) {
+      console.error(error);
+      setBackupError('Unable to copy the data directory path.');
+    }
+  };
+
+  const handleCreateBackup = async () => {
+    const candidate = (adminSessionCode ?? '').trim();
+    if (requiresAdminCode && !candidate) {
+      setBackupError('Enter the admin code to create a backup.');
+      return;
+    }
+
+    setCreatingBackup(true);
+    setBackupError(null);
+    setBackupNotice(null);
+
+    try {
+      const response = await fetch('/api/backups', {
+        method: 'POST',
+        headers: candidate ? { 'x-admin-code': candidate } : undefined,
+      });
+
+      if (response.status === 401) {
+        setRequiresAdminCode(true);
+        setAdminSessionCode(null);
+        setAdminCode(null);
+        setUnlockError('Admin code expired. Please enter it again to continue.');
+        setBackupError('Admin code required to create a backup.');
+        return;
+      }
+
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload?.error ?? 'Failed to create backup');
+      }
+
+      const result = (await response.json()) as BackupResult;
+      setBackupNotice(`Backup created: ${result.fileName}`);
+      await loadBackupStatus(candidate);
+    } catch (error) {
+      console.error(error);
+      setBackupError(error instanceof Error ? error.message : 'Failed to create backup');
+    } finally {
+      setCreatingBackup(false);
+    }
+  };
+
+  const handleRestoreBackup = async () => {
+    const candidate = (adminSessionCode ?? '').trim();
+    if (requiresAdminCode && !candidate) {
+      setBackupError('Enter the admin code to restore a backup.');
+      return;
+    }
+
+    if (!restoreFile) {
+      setBackupError('Choose a backup file to restore.');
+      return;
+    }
+
+    const confirmed = window.confirm(
+      'Restoring a backup will replace the current database. Continue?'
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setRestoringBackup(true);
+    setBackupError(null);
+    setBackupNotice(null);
+
+    try {
+      const formData = new FormData();
+      formData.append('file', restoreFile);
+
+      const headers: Record<string, string> = {};
+      if (candidate) {
+        headers['x-admin-code'] = candidate;
+      }
+
+      const response = await fetch('/api/backups/restore', {
+        method: 'POST',
+        headers,
+        body: formData,
+      });
+
+      if (response.status === 401) {
+        setRequiresAdminCode(true);
+        setAdminSessionCode(null);
+        setAdminCode(null);
+        setUnlockError('Admin code expired. Please enter it again to continue.');
+        setBackupError('Admin code required to restore backups.');
+        return;
+      }
+
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload?.error ?? 'Failed to restore backup');
+      }
+
+      setBackupNotice('Backup restored successfully.');
+      setRestoreFile(null);
+      await loadSettings(candidate || null);
+    } catch (error) {
+      console.error(error);
+      setBackupError(error instanceof Error ? error.message : 'Failed to restore backup');
+    } finally {
+      setRestoringBackup(false);
+    }
   };
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -293,8 +521,10 @@ const SettingsPage: React.FC = () => {
         clearAdminCode: false,
       });
       setAdminSessionCode(resolvedCode ?? null);
+      setAdminCode(resolvedCode ?? null);
       setRequiresAdminCode(Boolean(data.adminCodeSet && !resolvedCode));
       void loadTransactionStats(resolvedCode ?? null);
+      void loadBackupStatus(resolvedCode ?? null);
       setSuccess('Settings updated successfully.');
     } catch (err) {
       console.error(err);
@@ -511,9 +741,113 @@ const SettingsPage: React.FC = () => {
               )}
             </section>
 
+            <section className="rounded-xl bg-white p-6 shadow border border-gray-100 space-y-4">
+              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <h2 className="text-xl font-semibold text-gray-900">Data & Backups</h2>
+                  <p className="text-sm text-gray-600">
+                    Local storage path, latest backup, and restore tools.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 hover:border-camp-500 disabled:opacity-60"
+                  onClick={handleCreateBackup}
+                  disabled={creatingBackup}
+                >
+                  {creatingBackup ? 'Creating...' : 'Create Backup'}
+                </button>
+              </div>
+
+              {backupError ? (
+                <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                  {backupError}
+                </div>
+              ) : null}
+
+              {backupNotice ? (
+                <div className="rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-700">
+                  {backupNotice}
+                </div>
+              ) : null}
+
+              {loadingBackupStatus ? (
+                <p className="text-sm text-gray-500">Loading backup status...</p>
+              ) : backupStatus ? (
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 space-y-2">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-xs uppercase tracking-wide text-gray-500">Data directory</p>
+                        <p className="mt-1 break-all text-sm font-medium text-gray-800">
+                          {backupStatus.dataDirectory}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        className="rounded-full border border-gray-300 px-3 py-1 text-xs font-semibold text-gray-600 hover:border-camp-500"
+                        onClick={handleCopyPath}
+                      >
+                        Copy
+                      </button>
+                    </div>
+                    <p className="text-xs text-gray-500">Database: {backupStatus.dbPath}</p>
+                    <p className="text-xs text-gray-500">Backups: {backupStatus.backupDirectory}</p>
+                  </div>
+                  <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 space-y-2">
+                    <p className="text-xs uppercase tracking-wide text-gray-500">Latest backup</p>
+                    <p className="text-sm font-medium text-gray-800">
+                      {backupStatus.lastBackupFile ?? 'Not available'}
+                    </p>
+                    <p className="text-xs text-gray-500">
+                      {formatBackupTimestamp(backupStatus.lastBackupAt)}
+                    </p>
+                    <p className="text-xs text-gray-500">
+                      Last restore: {formatBackupTimestamp(backupStatus.lastRestoreAt)}
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <div className="rounded-lg border border-dashed border-gray-200 p-4 text-sm text-gray-500">
+                  Backup status unavailable. Try refreshing or verify admin access.
+                </div>
+              )}
+
+              <div className="rounded-lg border border-dashed border-gray-200 p-4 space-y-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-900">Restore from backup</h3>
+                  <p className="text-xs text-gray-500">
+                    Restoring replaces the active database. A safety backup is kept automatically.
+                  </p>
+                </div>
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                  <input
+                    type="file"
+                    accept=".db"
+                    className="block w-full text-sm text-gray-500 file:mr-3 file:rounded-lg file:border file:border-gray-300 file:bg-white file:px-3 file:py-2 file:text-sm file:font-semibold file:text-gray-700 hover:file:border-camp-500"
+                    disabled={restoringBackup}
+                    onChange={(event) => {
+                      const file = event.target.files?.[0] ?? null;
+                      setRestoreFile(file);
+                      setBackupError(null);
+                      setBackupNotice(null);
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="rounded-lg bg-camp-600 px-4 py-2 text-sm font-semibold text-white shadow hover:bg-camp-700 disabled:opacity-60"
+                    onClick={handleRestoreBackup}
+                    disabled={!restoreFile || restoringBackup}
+                  >
+                    {restoringBackup ? 'Restoring...' : 'Restore Backup'}
+                  </button>
+                </div>
+              </div>
+            </section>
+
             <section className="rounded-xl bg-white p-6 shadow">
               {loading ? (
-                <p className="text-sm text-gray-500">Loading settings…</p>
+                <p className="text-sm text-gray-500">Loading settings...</p>
               ) : (
                 <form className="space-y-8" onSubmit={handleSubmit}>
                   <fieldset className="space-y-4">
@@ -681,7 +1015,7 @@ const SettingsPage: React.FC = () => {
                       Reset
                     </button>
                     <button type="submit" className="pos-button" disabled={saving}>
-                      {saving ? 'Saving…' : 'Save Settings'}
+                      {saving ? 'Saving...' : 'Save Settings'}
                     </button>
                   </div>
                 </form>

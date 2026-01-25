@@ -139,3 +139,18 @@ export interface AppSettingsPayload {
   globalDiscountPercent: number;
   globalDiscountFlat: number;
 }
+
+export interface BackupStatus {
+  dataDirectory: string;
+  dbPath: string;
+  backupDirectory: string;
+  lastBackupAt: string | null;
+  lastBackupFile: string | null;
+  lastRestoreAt: string | null;
+}
+
+export interface BackupResult {
+  fileName: string;
+  createdAt: string;
+  size: number;
+}

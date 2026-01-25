@@ -9,6 +9,8 @@ export async function GET(request: NextRequest) {
     const database = DatabaseManager.getInstance();
     const limitParam = request.nextUrl.searchParams.get('limit');
     let limit = Number.parseInt(limitParam ?? '50', 10);
+    const offsetParam = request.nextUrl.searchParams.get('offset');
+    const offset = offsetParam ? Number.parseInt(offsetParam, 10) : 0;
 
     if (!Number.isFinite(limit) || limit <= 0) {
       limit = 50;
@@ -18,12 +20,15 @@ export async function GET(request: NextRequest) {
       limit = 500;
     }
 
-    const transactions = await database.listAllTransactions();
-    const payload = transactions.slice(0, limit);
+    const [transactions, totalCount] = await Promise.all([
+      database.listAllTransactions(limit, offset),
+      database.getTransactionCount(),
+    ]);
+    const payload = transactions;
 
     return NextResponse.json({
       transactions: payload,
-      totalCount: transactions.length,
+      totalCount,
     });
   } catch (error) {
     console.error('Error listing transactions:', error);

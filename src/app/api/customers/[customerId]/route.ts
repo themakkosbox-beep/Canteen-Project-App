@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import DatabaseManager from '@/lib/database';
+import { requireAdminAccess } from '@/lib/admin-auth';
 
 export const runtime = 'nodejs';
 
@@ -42,6 +43,11 @@ export async function PUT(
   { params }: { params: { customerId: string } }
 ) {
   try {
+    const auth = await requireAdminAccess(request);
+    if (auth) {
+      return auth;
+    }
+
     const { customerId } = params;
     const body = await request.json();
     const { name } = body;
