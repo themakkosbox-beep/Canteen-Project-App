@@ -2,6 +2,8 @@
 
 Camp Canteen POS is a Next.js + Electron application for managing prepaid canteen accounts, running both as a web app and a packaged Windows desktop experience.
 
+**Latest release:** v2.2.0
+
 ## Features
 
 - Customer lookup, quick keys, barcode scanning, deposits, adjustments, receipts

@@ -11,7 +11,13 @@ import {
   NoSymbolIcon,
   ShieldCheckIcon,
 } from '@heroicons/react/24/outline';
-import type { AppSettingsPayload, TransactionStatsSummary, BackupStatus, BackupResult } from '@/types/database';
+import type {
+  AppSettingsPayload,
+  TransactionStatsSummary,
+  BackupStatus,
+  BackupResult,
+  AppFeatureFlags,
+} from '@/types/database';
 import { getAdminCode, setAdminCode } from '@/lib/admin-session';
 
 interface SettingsFormState {
@@ -21,6 +27,7 @@ interface SettingsFormState {
   newAdminCode: string;
   currentAdminCode: string;
   clearAdminCode: boolean;
+  featureFlags: AppFeatureFlags;
 }
 
 const defaultFormState: SettingsFormState = {
@@ -30,6 +37,15 @@ const defaultFormState: SettingsFormState = {
   newAdminCode: '',
   currentAdminCode: '',
   clearAdminCode: false,
+  featureFlags: {
+    offlineStatus: true,
+    dailyCloseout: true,
+    inventoryAlerts: true,
+    refundFlow: true,
+    activityLog: true,
+    backupReminders: true,
+    customerQr: true,
+  },
 };
 
 const ADMIN_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
@@ -54,6 +70,48 @@ const StatsSkeleton = () => (
     </div>
   </div>
 );
+
+const FEATURE_TOGGLES: Array<{
+  key: keyof AppFeatureFlags;
+  label: string;
+  description: string;
+}> = [
+  {
+    key: 'offlineStatus',
+    label: 'Offline status badge',
+    description: 'Show a banner so staff know the register is safe to use offline.',
+  },
+  {
+    key: 'dailyCloseout',
+    label: 'Daily closeout summary',
+    description: 'Surface end-of-day totals for deposits, purchases, and adjustments.',
+  },
+  {
+    key: 'inventoryAlerts',
+    label: 'Inventory alerts',
+    description: 'Highlight low-stock items for managers to restock.',
+  },
+  {
+    key: 'refundFlow',
+    label: 'Refunds & voids',
+    description: 'Allow voids and refunds to be recorded with notes.',
+  },
+  {
+    key: 'activityLog',
+    label: 'Activity log',
+    description: 'Track important admin actions like edits, backups, and exports.',
+  },
+  {
+    key: 'backupReminders',
+    label: 'Backup reminders',
+    description: 'Show reminders when a backup has not been created recently.',
+  },
+  {
+    key: 'customerQr',
+    label: 'Customer QR cards',
+    description: 'Generate QR codes for fast customer lookup at the register.',
+  },
+];
 
 const SettingsPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
@@ -229,6 +287,7 @@ const SettingsPage: React.FC = () => {
           newAdminCode: '',
           currentAdminCode: data.adminCodeSet ? resolvedCode : '',
           clearAdminCode: false,
+          featureFlags: data.featureFlags,
         });
 
         setRequiresAdminCode(false);
@@ -469,6 +528,7 @@ const SettingsPage: React.FC = () => {
       brandName: form.brandName.trim(),
       globalDiscountPercent: parsedPercent,
       globalDiscountFlat: parsedFlat,
+      featureFlags: form.featureFlags,
     };
 
     if (adminCodeSet) {
@@ -519,6 +579,7 @@ const SettingsPage: React.FC = () => {
         newAdminCode: '',
         currentAdminCode: data.adminCodeSet ? (resolvedCode ?? '') : '',
         clearAdminCode: false,
+        featureFlags: data.featureFlags,
       });
       setAdminSessionCode(resolvedCode ?? null);
       setAdminCode(resolvedCode ?? null);
@@ -538,6 +599,16 @@ const SettingsPage: React.FC = () => {
     setForm((previous) => ({
       ...previous,
       brandName: '',
+    }));
+  };
+
+  const handleFeatureToggle = (key: keyof AppFeatureFlags) => {
+    setForm((previous) => ({
+      ...previous,
+      featureFlags: {
+        ...previous.featureFlags,
+        [key]: !previous.featureFlags[key],
+      },
     }));
   };
 
@@ -929,6 +1000,32 @@ const SettingsPage: React.FC = () => {
                         />
                         <p className="mt-1 text-xs text-gray-500">Leave at 0.00 for no flat discount.</p>
                       </div>
+                    </div>
+                  </fieldset>
+
+                  <fieldset className="space-y-4">
+                    <legend className="text-lg font-semibold text-gray-900">Feature Toggles</legend>
+                    <p className="text-sm text-gray-600">
+                      Enable or disable offline-friendly capabilities and manager tools.
+                    </p>
+                    <div className="space-y-3">
+                      {FEATURE_TOGGLES.map((toggle) => (
+                        <label
+                          key={toggle.key}
+                          className="flex items-start justify-between gap-4 rounded-lg border border-gray-200 bg-gray-50 px-4 py-3"
+                        >
+                          <div>
+                            <p className="text-sm font-semibold text-gray-900">{toggle.label}</p>
+                            <p className="text-xs text-gray-600">{toggle.description}</p>
+                          </div>
+                          <input
+                            type="checkbox"
+                            checked={form.featureFlags[toggle.key]}
+                            onChange={() => handleFeatureToggle(toggle.key)}
+                            className="mt-1 h-5 w-5 accent-camp-600"
+                          />
+                        </label>
+                      ))}
                     </div>
                   </fieldset>
 

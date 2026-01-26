@@ -13,6 +13,7 @@ import {
   TransactionLog,
   TransactionOptionSelection,
   TransactionStatsSummary,
+  AppFeatureFlags,
   AppSettingsPayload,
   CustomerTypeDefinition,
   BackupStatus,
@@ -32,6 +33,17 @@ const APP_GLOBAL_DISCOUNT_PERCENT_KEY = 'app_global_discount_percent';
 const APP_GLOBAL_DISCOUNT_FLAT_KEY = 'app_global_discount_flat';
 const APP_SCHEMA_VERSION_KEY = 'app_schema_version';
 const CUSTOMER_TYPES_SETTING_KEY = 'customer_types_v1';
+const APP_FEATURE_FLAGS_KEY = 'app_feature_flags_v1';
+
+const DEFAULT_FEATURE_FLAGS: AppFeatureFlags = {
+  offlineStatus: true,
+  dailyCloseout: true,
+  inventoryAlerts: true,
+  refundFlow: true,
+  activityLog: true,
+  backupReminders: true,
+  customerQr: true,
+};
 const SCHEMA_VERSION = 2;
 const ADMIN_CODE_HASH_ITERATIONS = 120000;
 const ADMIN_CODE_HASH_SALT_BYTES = 16;
@@ -776,17 +788,38 @@ class DatabaseManager {
     };
   }
 
+  private readFeatureFlags(db: SqlJsDatabase): AppFeatureFlags {
+    const raw = this.readSetting(db, APP_FEATURE_FLAGS_KEY);
+    if (!raw) {
+      this.writeSetting(db, APP_FEATURE_FLAGS_KEY, JSON.stringify(DEFAULT_FEATURE_FLAGS));
+      return DEFAULT_FEATURE_FLAGS;
+    }
+    try {
+      const parsed = JSON.parse(raw) as Partial<AppFeatureFlags> | null;
+      return {
+        ...DEFAULT_FEATURE_FLAGS,
+        ...(parsed ?? {}),
+      };
+    } catch (error) {
+      console.warn('Failed to parse feature flags, resetting to defaults.', error);
+      this.writeSetting(db, APP_FEATURE_FLAGS_KEY, JSON.stringify(DEFAULT_FEATURE_FLAGS));
+      return DEFAULT_FEATURE_FLAGS;
+    }
+  }
+
   public async getAppSettings(): Promise<AppSettingsPayload> {
     return this.withDatabase((db) => {
       const storedBrand = this.readSetting(db, APP_BRAND_NAME_KEY);
       const normalizedBrand = sanitizeBrandName(storedBrand) ?? 'Camp Canteen POS';
       const adminCodeHash = this.readSetting(db, APP_ADMIN_CODE_KEY);
       const globalDiscount = this.readGlobalDiscount(db);
+      const featureFlags = this.readFeatureFlags(db);
       return {
         brandName: normalizedBrand,
         adminCodeSet: Boolean(adminCodeHash && adminCodeHash.trim().length > 0),
         globalDiscountPercent: globalDiscount.percent,
         globalDiscountFlat: globalDiscount.flat,
+        featureFlags,
       };
     });
   }
@@ -818,6 +851,7 @@ class DatabaseManager {
     clearAdminCode?: boolean;
     globalDiscountPercent?: number | null;
     globalDiscountFlat?: number | null;
+    featureFlags?: Partial<AppFeatureFlags> | null;
   }): Promise<AppSettingsPayload> {
     const nextBrand = sanitizeBrandName(options.brandName);
     const wantsClear = Boolean(options.clearAdminCode);
@@ -860,15 +894,26 @@ class DatabaseManager {
         );
       }
 
+      if (options.featureFlags) {
+        const currentFlags = this.readFeatureFlags(db);
+        const mergedFlags: AppFeatureFlags = {
+          ...currentFlags,
+          ...options.featureFlags,
+        };
+        this.writeSetting(db, APP_FEATURE_FLAGS_KEY, JSON.stringify(mergedFlags));
+      }
+
       const updatedBrand = sanitizeBrandName(this.readSetting(db, APP_BRAND_NAME_KEY)) ?? 'Camp Canteen POS';
       const adminCodeHash = this.readSetting(db, APP_ADMIN_CODE_KEY);
       const globalDiscount = this.readGlobalDiscount(db);
+      const featureFlags = this.readFeatureFlags(db);
 
       return {
         brandName: updatedBrand,
         adminCodeSet: Boolean(adminCodeHash && adminCodeHash.trim().length > 0),
         globalDiscountPercent: globalDiscount.percent,
         globalDiscountFlat: globalDiscount.flat,
+        featureFlags,
       };
     }, true);
   }
@@ -2280,19 +2325,6 @@ class DatabaseManager {
           throw new Error('Transaction does not belong to the provided customer');
         }
 
-        const latestStmt = db.prepare(`
-          SELECT transaction_id
-          FROM transactions
-          WHERE customer_id = ?
-          ORDER BY timestamp DESC, id DESC
-          LIMIT 1
-        `);
-        latestStmt.bind([normalizedCustomerId]);
-        const latest = this.fetchOne<{ transaction_id: string }>(latestStmt);
-        if (!latest || latest.transaction_id !== normalizedTransactionId) {
-          throw new Error('Only the most recent transaction for the customer can be edited');
-        }
-
         const customerStmt = db.prepare('SELECT * FROM customers WHERE customer_id = ?');
         customerStmt.bind([normalizedCustomerId]);
         const customerRow = this.fetchOne<Customer>(customerStmt);
@@ -2523,19 +2555,6 @@ class DatabaseManager {
 
         if (transaction.customer_id !== normalizedCustomerId) {
           throw new Error('Transaction does not belong to this customer');
-        }
-
-        const latestStmt = db.prepare(`
-          SELECT transaction_id
-          FROM transactions
-          WHERE customer_id = ?
-          ORDER BY timestamp DESC, id DESC
-          LIMIT 1
-        `);
-        latestStmt.bind([normalizedCustomerId]);
-        const latest = this.fetchOne<{ transaction_id: string }>(latestStmt);
-        if (!latest || latest.transaction_id !== normalizedTransactionId) {
-          throw new Error('Only the most recent transaction for the customer can be edited');
         }
 
         const nextAmount = this.roundCurrency(amountInput);
@@ -3256,19 +3275,6 @@ class DatabaseManager {
           throw new Error('Only purchase or deposit transactions can be deleted');
         }
 
-        const latestStmt = db.prepare(`
-          SELECT transaction_id
-          FROM transactions
-          WHERE customer_id = ?
-          ORDER BY timestamp DESC, id DESC
-          LIMIT 1
-        `);
-        latestStmt.bind([transaction.customer_id]);
-        const latest = this.fetchOne<{ transaction_id: string }>(latestStmt);
-        if (!latest || latest.transaction_id !== transactionId) {
-          throw new Error('Only the most recent transaction for the customer can be deleted');
-        }
-
         const customerStmt = db.prepare(
           'SELECT * FROM customers WHERE customer_id = ?'
         );
@@ -3355,20 +3361,6 @@ class DatabaseManager {
 
         if (transaction.type !== 'purchase' && transaction.type !== 'deposit') {
           throw new Error('Only purchase or deposit transactions can be unvoided');
-        }
-
-        const latestStmt = db.prepare(`
-          SELECT transaction_id
-          FROM transactions
-          WHERE customer_id = ?
-          ORDER BY timestamp DESC, id DESC
-          LIMIT 1
-        `);
-        latestStmt.bind([transaction.customer_id]);
-        const latest = this.fetchOne<{ transaction_id: string }>(latestStmt);
-
-        if (!latest || latest.transaction_id !== transactionId) {
-          throw new Error('Only the most recent transaction for the customer can be unvoided');
         }
 
         const customerStmt = db.prepare(

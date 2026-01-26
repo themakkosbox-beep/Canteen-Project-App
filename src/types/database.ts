@@ -138,6 +138,17 @@ export interface AppSettingsPayload {
   adminCodeSet: boolean;
   globalDiscountPercent: number;
   globalDiscountFlat: number;
+  featureFlags: AppFeatureFlags;
+}
+
+export interface AppFeatureFlags {
+  offlineStatus: boolean;
+  dailyCloseout: boolean;
+  inventoryAlerts: boolean;
+  refundFlow: boolean;
+  activityLog: boolean;
+  backupReminders: boolean;
+  customerQr: boolean;
 }
 
 export interface BackupStatus {
