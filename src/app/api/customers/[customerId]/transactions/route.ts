@@ -5,10 +5,10 @@ export const runtime = 'nodejs';
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { customerId: string } }
+  { params }: { params: Promise<{ customerId: string }> }
 ) {
   try {
-    const { customerId } = params;
+    const { customerId } = await params;
     
     if (!customerId || customerId.length !== 4) {
       return NextResponse.json(

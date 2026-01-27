@@ -6,10 +6,10 @@ export const runtime = 'nodejs';
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { customerId: string } }
+  { params }: { params: Promise<{ customerId: string }> }
 ) {
   try {
-    const { customerId } = params;
+    const { customerId } = await params;
     
     if (!customerId || customerId.length !== 4) {
       return NextResponse.json(
@@ -40,7 +40,7 @@ export async function GET(
 
 export async function PUT(
   request: NextRequest,
-  { params }: { params: { customerId: string } }
+  { params }: { params: Promise<{ customerId: string }> }
 ) {
   try {
     const auth = await requireAdminAccess(request);
@@ -48,7 +48,7 @@ export async function PUT(
       return auth;
     }
 
-    const { customerId } = params;
+    const { customerId } = await params;
     const body = await request.json();
     const { name } = body;
 

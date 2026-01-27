@@ -2,7 +2,6 @@ const { version } = require('./package.json');
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  swcMinify: true,
   trailingSlash: false,
   output: 'standalone',
   env: {

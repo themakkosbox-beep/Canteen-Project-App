@@ -7,10 +7,10 @@ export const runtime = 'nodejs';
 
 export async function DELETE(
   request: NextRequest,
-  { params }: { params: { transactionId: string } }
+  { params }: { params: Promise<{ transactionId: string }> }
 ) {
   try {
-    const { transactionId } = params;
+    const { transactionId } = await params;
     let note: string | undefined;
     try {
       const payload = await request.json();
@@ -43,10 +43,10 @@ export async function DELETE(
 
 export async function PATCH(
   request: NextRequest,
-  { params }: { params: { transactionId: string } }
+  { params }: { params: Promise<{ transactionId: string }> }
 ) {
   try {
-    const { transactionId } = params;
+    const { transactionId } = await params;
     const payload = await request.json().catch(() => ({}));
     const action = typeof payload?.action === 'string' ? payload.action : '';
     const note = typeof payload?.note === 'string' ? payload.note : undefined;
@@ -77,10 +77,10 @@ export async function PATCH(
 
 export async function PUT(
   request: NextRequest,
-  { params }: { params: { transactionId: string } }
+  { params }: { params: Promise<{ transactionId: string }> }
 ) {
   try {
-    const { transactionId } = params;
+    const { transactionId } = await params;
     const body = await request.json();
 
     const customerId = typeof body?.customerId === 'string' ? body.customerId.trim() : '';

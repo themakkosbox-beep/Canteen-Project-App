@@ -7,10 +7,10 @@ export const runtime = 'nodejs';
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { productId: string } }
+  { params }: { params: Promise<{ productId: string }> }
 ) {
   try {
-    const { productId } = params;
+    const { productId } = await params;
     if (!productId) {
       return NextResponse.json({ error: 'Product ID is required' }, { status: 400 });
     }
@@ -34,7 +34,7 @@ export async function GET(
 
 export async function PUT(
   request: NextRequest,
-  { params }: { params: { productId: string } }
+  { params }: { params: Promise<{ productId: string }> }
 ) {
   try {
     const auth = await requireAdminAccess(request);
@@ -42,7 +42,7 @@ export async function PUT(
       return auth;
     }
 
-    const { productId } = params;
+    const { productId } = await params;
     if (!productId) {
       return NextResponse.json({ error: 'Product ID is required' }, { status: 400 });
     }
