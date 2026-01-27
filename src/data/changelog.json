@@ -1,8 +1,26 @@
 [
   {
-    "version": "Unreleased",
+    "version": "v2.1.0",
+    "date": "Mon Jan 26 2026",
+    "highlights": [
+      "chore: release v2.1.0",
+      "Merge pull request #1 from themakkosbox-beep/codex/continue-github-copilot-project-work",
+      "feat: allow editing any transaction and refresh branding"
+    ]
+  },
+  {
+    "version": "v2.0.0",
+    "date": "Sun Jan 25 2026",
+    "highlights": [
+      "chore(release): bump version to 2.0.0"
+    ]
+  },
+  {
+    "version": "v1.3.2",
     "date": "Wed Nov 19 2025",
     "highlights": [
+      "chore(release): bump version to 1.3.2",
+      "chore: update generated changelog",
       "assets: generate multi-size app-icon.ico from SVG; add generator script"
     ]
   },

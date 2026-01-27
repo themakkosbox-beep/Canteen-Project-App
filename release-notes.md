@@ -1,14 +1,11 @@
 # Changelog
 
-## v2.2.0 - Mon Jan 26 2026
+## v2.1.0 - Tue Jan 27 2026
 
-- Allow edits and voids for any transaction (admin-managed).
-- Refresh brand mark and feature toggles for offline tools.
-
-## v2.1.0 - Mon Jan 26 2026
-
+- transactions: allow edits and voids on any transaction
+- admin: add app settings feature flags for offline tools
+- branding: refresh canteen logo/icon
 - Bump version to 2.1.0
-- Refresh release documentation and package metadata
 
 ## v2.0.0 - Sat Jan 24 2026
 
