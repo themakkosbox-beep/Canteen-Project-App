@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.1.1 - Tue Jan 27 2026
+
+- tooling: upgrade Next.js + ESLint stack and resolve audit issues
+- api: align route param typing for Next 16
+- build: pin webpack for Next build to avoid Turbopack mismatch
+- Bump version to 2.1.1
+
 ## v2.1.0 - Tue Jan 27 2026
 
 - transactions: allow edits and voids on any transaction
