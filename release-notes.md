@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.1.2 - Tue Jan 27 2026
+
+- packaging: fix standalone server path resolution for Electron builds
+- Bump version to 2.1.2
+
 ## v2.1.1 - Tue Jan 27 2026
 
 - tooling: upgrade Next.js + ESLint stack and resolve audit issues

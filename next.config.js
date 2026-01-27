@@ -1,9 +1,11 @@
+const path = require('path');
 const { version } = require('./package.json');
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   trailingSlash: false,
   output: 'standalone',
+  outputFileTracingRoot: path.resolve(__dirname),
   env: {
     NEXT_PUBLIC_APP_VERSION: process.env.NEXT_PUBLIC_APP_VERSION ?? version,
   },
