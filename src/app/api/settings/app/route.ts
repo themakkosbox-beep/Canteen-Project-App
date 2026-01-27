@@ -53,6 +53,10 @@ const handleWrite = async (request: NextRequest) => {
         : typeof body?.globalDiscountFlat === 'string'
         ? Number.parseFloat(body.globalDiscountFlat)
         : undefined;
+    const featureFlags =
+      body?.featureFlags && typeof body.featureFlags === 'object'
+        ? (body.featureFlags as Record<string, unknown>)
+        : undefined;
 
     if (typeof globalDiscountPercent === 'number' && !Number.isFinite(globalDiscountPercent)) {
       globalDiscountPercent = undefined;
@@ -83,6 +87,18 @@ const handleWrite = async (request: NextRequest) => {
       clearAdminCode,
       globalDiscountPercent,
       globalDiscountFlat,
+      featureFlags:
+        featureFlags === undefined
+          ? undefined
+          : {
+              offlineStatus: Boolean(featureFlags.offlineStatus),
+              dailyCloseout: Boolean(featureFlags.dailyCloseout),
+              inventoryAlerts: Boolean(featureFlags.inventoryAlerts),
+              refundFlow: Boolean(featureFlags.refundFlow),
+              activityLog: Boolean(featureFlags.activityLog),
+              backupReminders: Boolean(featureFlags.backupReminders),
+              customerQr: Boolean(featureFlags.customerQr),
+            },
     });
 
     return NextResponse.json(nextSettings);

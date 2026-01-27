@@ -1846,6 +1846,12 @@ export default function POSPage() {
             </time>
           </div>
           <div className="flex items-center gap-3">
+            {appSettings?.featureFlags?.offlineStatus ? (
+              <span className="hidden items-center gap-2 rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700 sm:inline-flex">
+                <span className="h-2 w-2 rounded-full bg-emerald-500" aria-hidden="true" />
+                Offline ready
+              </span>
+            ) : null}
             <time
               aria-live="polite"
               className="hidden text-sm font-semibold text-gray-600 sm:block"

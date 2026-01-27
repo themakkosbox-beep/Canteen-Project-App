@@ -1,5 +1,15 @@
 # Changelog
 
+## v2.2.0 - Mon Jan 26 2026
+
+- Allow edits and voids for any transaction (admin-managed).
+- Refresh brand mark and feature toggles for offline tools.
+
+## v2.1.0 - Mon Jan 26 2026
+
+- Bump version to 2.1.0
+- Refresh release documentation and package metadata
+
 ## v2.0.0 - Sat Jan 24 2026
 
 - db: schema versioning, atomic writes, validation triggers, and new indexes
