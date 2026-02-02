@@ -1,8 +1,9 @@
 [
   {
-    "version": "Unreleased",
+    "version": "v2.4.0",
     "date": "Mon Feb 02 2026",
     "highlights": [
+      "chore: release v2.4.0",
       "chore: update generated changelog"
     ]
   },
