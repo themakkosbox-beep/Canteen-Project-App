@@ -2,7 +2,7 @@
 
 Camp Canteen POS is a Next.js + Electron application for managing prepaid canteen accounts, running both as a web app and a packaged Windows desktop experience.
 
-**Latest release:** v2.2.0
+**Latest release:** v2.4.0
 
 ## Features
 
@@ -16,7 +16,7 @@ Camp Canteen POS is a Next.js + Electron application for managing prepaid cantee
 
 ## Tech Stack
 
-- Next.js 14, React 18, TypeScript, Tailwind CSS
+- Next.js 16, React 18, TypeScript, Tailwind CSS
 - Headless UI and Heroicons for UI controls
 - Fuse.js for fuzzy product search
 - Electron 31 with electron-builder and electron-updater
@@ -99,6 +99,13 @@ npm run start
 - `CANTEEN_DATA_DIR` - override the directory used to store `canteen.db` and backups.
 - `CANTEEN_ADMIN_PEPPER` - optional pepper for admin code hashing (recommended for deployments).
 - `GH_TOKEN` - required by `electron-builder` to upload releases to GitHub.
+- `HTTP_PROXY` / `HTTPS_PROXY` - preferred proxy variables for npm (avoid deprecated `http-proxy` env keys).
+
+If npm warns about `http-proxy`, use the helper script to clear deprecated env keys:
+
+```bash
+./scripts/npm-clean-env.sh install
+```
 
 ## Database Notes
 

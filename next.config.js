@@ -6,9 +6,11 @@ const nextConfig = {
   trailingSlash: false,
   output: 'standalone',
   outputFileTracingRoot: path.resolve(__dirname),
+  allowedDevOrigins: ['127.0.0.1', 'localhost'],
   env: {
     NEXT_PUBLIC_APP_VERSION: process.env.NEXT_PUBLIC_APP_VERSION ?? version,
   },
+  turbopack: {},
   webpack: (config, { isServer }) => {
     if (isServer) {
       config.externals = config.externals || [];

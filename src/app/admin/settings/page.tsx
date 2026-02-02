@@ -17,6 +17,7 @@ import type {
   BackupStatus,
   BackupResult,
   AppFeatureFlags,
+  ShiftDefinition,
 } from '@/types/database';
 import { getAdminCode, setAdminCode } from '@/lib/admin-session';
 
@@ -28,6 +29,9 @@ interface SettingsFormState {
   currentAdminCode: string;
   clearAdminCode: boolean;
   featureFlags: AppFeatureFlags;
+  shifts: ShiftDefinition[];
+  activeShiftId: string;
+  printerStations: string[];
 }
 
 const defaultFormState: SettingsFormState = {
@@ -46,6 +50,13 @@ const defaultFormState: SettingsFormState = {
     backupReminders: true,
     customerQr: true,
   },
+  shifts: [
+    { id: 'breakfast', label: 'Breakfast', startTime: '07:00', endTime: '10:30' },
+    { id: 'lunch', label: 'Lunch', startTime: '11:00', endTime: '14:00' },
+    { id: 'dinner', label: 'Dinner', startTime: '17:00', endTime: '20:00' },
+  ],
+  activeShiftId: 'breakfast',
+  printerStations: ['Kitchen', 'Snack Bar', 'Grill'],
 };
 
 const ADMIN_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
@@ -135,6 +146,7 @@ const SettingsPage: React.FC = () => {
   const [creatingBackup, setCreatingBackup] = useState(false);
   const [restoringBackup, setRestoringBackup] = useState(false);
   const [restoreFile, setRestoreFile] = useState<File | null>(null);
+  const [newPrinterStation, setNewPrinterStation] = useState('');
 
   const currencyFormatter = useMemo(
     () => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }),
@@ -288,6 +300,12 @@ const SettingsPage: React.FC = () => {
           currentAdminCode: data.adminCodeSet ? resolvedCode : '',
           clearAdminCode: false,
           featureFlags: data.featureFlags,
+          shifts: Array.isArray(data.shifts) && data.shifts.length > 0 ? data.shifts : defaultFormState.shifts,
+          activeShiftId: data.activeShiftId ?? defaultFormState.activeShiftId,
+          printerStations:
+            Array.isArray(data.printerStations) && data.printerStations.length > 0
+              ? data.printerStations
+              : defaultFormState.printerStations,
         });
 
         setRequiresAdminCode(false);
@@ -529,6 +547,9 @@ const SettingsPage: React.FC = () => {
       globalDiscountPercent: parsedPercent,
       globalDiscountFlat: parsedFlat,
       featureFlags: form.featureFlags,
+      shifts: form.shifts,
+      activeShiftId: form.activeShiftId,
+      printerStations: form.printerStations,
     };
 
     if (adminCodeSet) {
@@ -580,6 +601,12 @@ const SettingsPage: React.FC = () => {
         currentAdminCode: data.adminCodeSet ? (resolvedCode ?? '') : '',
         clearAdminCode: false,
         featureFlags: data.featureFlags,
+        shifts: Array.isArray(data.shifts) && data.shifts.length > 0 ? data.shifts : defaultFormState.shifts,
+        activeShiftId: data.activeShiftId ?? defaultFormState.activeShiftId,
+        printerStations:
+          Array.isArray(data.printerStations) && data.printerStations.length > 0
+            ? data.printerStations
+            : defaultFormState.printerStations,
       });
       setAdminSessionCode(resolvedCode ?? null);
       setAdminCode(resolvedCode ?? null);
@@ -612,6 +639,75 @@ const SettingsPage: React.FC = () => {
     }));
   };
 
+  const handleShiftChange = (
+    index: number,
+    key: keyof ShiftDefinition,
+    value: string
+  ) => {
+    setForm((previous) => {
+      const updated = [...previous.shifts];
+      const target = updated[index];
+      if (!target) {
+        return previous;
+      }
+      updated[index] = {
+        ...target,
+        [key]: value,
+      };
+      return { ...previous, shifts: updated };
+    });
+  };
+
+  const handleAddShift = () => {
+    setForm((previous) => ({
+      ...previous,
+      shifts: [
+        ...previous.shifts,
+        {
+          id: `shift-${Date.now()}`,
+          label: 'New Shift',
+          startTime: '09:00',
+          endTime: '12:00',
+        },
+      ],
+    }));
+  };
+
+  const handleRemoveShift = (index: number) => {
+    setForm((previous) => {
+      const updated = previous.shifts.filter((_, idx) => idx !== index);
+      const nextShifts = updated.length > 0 ? updated : previous.shifts;
+      const nextActive =
+        nextShifts.find((shift) => shift.id === previous.activeShiftId)?.id ??
+        nextShifts[0]?.id ??
+        '';
+      return {
+        ...previous,
+        shifts: nextShifts,
+        activeShiftId: nextActive,
+      };
+    });
+  };
+
+  const handleAddPrinterStation = () => {
+    const trimmed = newPrinterStation.trim();
+    if (!trimmed) {
+      return;
+    }
+    setForm((previous) => ({
+      ...previous,
+      printerStations: Array.from(new Set([...previous.printerStations, trimmed])),
+    }));
+    setNewPrinterStation('');
+  };
+
+  const handleRemovePrinterStation = (station: string) => {
+    setForm((previous) => ({
+      ...previous,
+      printerStations: previous.printerStations.filter((entry) => entry !== station),
+    }));
+  };
+
   const handleClearAdminCode = () => {
     setForm((previous) => ({
       ...previous,
@@ -621,35 +717,36 @@ const SettingsPage: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-gray-100 py-8">
-      <div className="mx-auto max-w-4xl space-y-6 px-4">
-        <header className="rounded-xl bg-white p-6 shadow">
-          <h1 className="text-2xl font-bold text-gray-900">Admin Settings</h1>
-          <p className="mt-1 text-sm text-gray-600">
-            Customize the brand, tune account-wide discounts, and manage the admin access code.
+    <div className="min-h-screen py-10">
+      <div className="mx-auto flex max-w-5xl flex-col gap-8 px-4">
+        <header className="pb-6 border-b border-slate-200">
+          <p className="text-xs font-semibold uppercase tracking-[0.3em] text-emerald-600">Settings</p>
+          <h1 className="page-title mt-3">Manager controls</h1>
+          <p className="mt-2 text-sm text-slate-500">
+            Tune pricing rules, backups, and which tools appear on the register.
           </p>
         </header>
 
         {error ? (
-          <div className="rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-700">
+          <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
             {error}
           </div>
         ) : null}
 
         {success ? (
-          <div className="rounded-lg border border-green-300 bg-green-50 px-4 py-3 text-sm text-green-700">
+          <div className="rounded-2xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-700">
             {success}
           </div>
         ) : null}
 
         {requiresAdminCode && !adminSessionCode ? (
-          <section className="rounded-xl bg-white p-8 shadow border border-gray-100 text-center space-y-6">
+          <section className="space-y-6 border border-slate-200 rounded-xl bg-white/80 p-8 text-center">
             <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-gray-100">
               <LockClosedIcon className="h-8 w-8 text-gray-500" />
             </div>
             <div className="space-y-2">
               <h2 className="text-xl font-semibold text-gray-900">Admin Access Required</h2>
-              <p className="text-gray-600 max-w-md mx-auto">
+              <p className="mx-auto max-w-md text-gray-600">
                 To view transaction statistics and manage application settings, please enter the secure admin code.
               </p>
             </div>
@@ -683,7 +780,7 @@ const SettingsPage: React.FC = () => {
           </section>
         ) : (
           <>
-            <section className="rounded-xl bg-white p-6 shadow border border-gray-100 space-y-6">
+            <section className="order-2 space-y-6 border-b border-slate-200 pb-8">
               <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
                 <div>
                   <h2 className="text-xl font-semibold text-gray-900 flex items-center gap-2">
@@ -691,7 +788,7 @@ const SettingsPage: React.FC = () => {
                     Transaction Snapshot
                   </h2>
                   <p className="text-sm text-gray-600 mt-1">
-                    Overview of all financial activity in the system.
+                    Daily totals and balance movement across the register.
                   </p>
                 </div>
                 <div className="flex items-center gap-3">
@@ -721,12 +818,12 @@ const SettingsPage: React.FC = () => {
               ) : transactionStats ? (
                 <div className="space-y-4">
                   <div className="grid gap-4 md:grid-cols-2">
-                    <div className="rounded-xl border border-blue-100 bg-blue-50/50 p-5">
+                    <div className="rounded-xl border border-emerald-100 bg-emerald-50/50 p-5">
                       <div className="flex items-center gap-3 mb-2">
-                        <div className="p-2 bg-blue-100 rounded-lg text-blue-600">
+                        <div className="p-2 bg-emerald-100 rounded-lg text-emerald-600">
                           <CreditCardIcon className="h-6 w-6" />
                         </div>
-                        <p className="text-sm font-medium uppercase tracking-wide text-blue-900">Total Transactions</p>
+                        <p className="text-sm font-medium uppercase tracking-wide text-emerald-900">Total Transactions</p>
                       </div>
                       <p className="text-4xl font-bold text-gray-900">
                         {transactionStats.totalTransactions.toLocaleString()}
@@ -812,17 +909,17 @@ const SettingsPage: React.FC = () => {
               )}
             </section>
 
-            <section className="rounded-xl bg-white p-6 shadow border border-gray-100 space-y-4">
+            <section className="order-3 space-y-4 border-b border-slate-200 pb-8">
               <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                 <div>
-                  <h2 className="text-xl font-semibold text-gray-900">Data & Backups</h2>
+                  <h2 className="text-xl font-semibold text-gray-900">Data protection</h2>
                   <p className="text-sm text-gray-600">
-                    Local storage path, latest backup, and restore tools.
+                    Review backup health and restore when needed.
                   </p>
                 </div>
                 <button
                   type="button"
-                  className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 hover:border-camp-500 disabled:opacity-60"
+                  className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 hover:border-emerald-400 disabled:opacity-60"
                   onClick={handleCreateBackup}
                   disabled={creatingBackup}
                 >
@@ -856,7 +953,7 @@ const SettingsPage: React.FC = () => {
                       </div>
                       <button
                         type="button"
-                        className="rounded-full border border-gray-300 px-3 py-1 text-xs font-semibold text-gray-600 hover:border-camp-500"
+                        className="rounded-full border border-gray-300 px-3 py-1 text-xs font-semibold text-gray-600 hover:border-emerald-400"
                         onClick={handleCopyPath}
                       >
                         Copy
@@ -895,7 +992,7 @@ const SettingsPage: React.FC = () => {
                   <input
                     type="file"
                     accept=".db"
-                    className="block w-full text-sm text-gray-500 file:mr-3 file:rounded-lg file:border file:border-gray-300 file:bg-white file:px-3 file:py-2 file:text-sm file:font-semibold file:text-gray-700 hover:file:border-camp-500"
+                    className="block w-full text-sm text-gray-500 file:mr-3 file:rounded-lg file:border file:border-gray-300 file:bg-white file:px-3 file:py-2 file:text-sm file:font-semibold file:text-gray-700 hover:file:border-emerald-400"
                     disabled={restoringBackup}
                     onChange={(event) => {
                       const file = event.target.files?.[0] ?? null;
@@ -906,7 +1003,7 @@ const SettingsPage: React.FC = () => {
                   />
                   <button
                     type="button"
-                    className="rounded-lg bg-camp-600 px-4 py-2 text-sm font-semibold text-white shadow hover:bg-camp-700 disabled:opacity-60"
+                    className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow hover:bg-emerald-700 disabled:opacity-60"
                     onClick={handleRestoreBackup}
                     disabled={!restoreFile || restoringBackup}
                   >
@@ -916,7 +1013,7 @@ const SettingsPage: React.FC = () => {
               </div>
             </section>
 
-            <section className="rounded-xl bg-white p-6 shadow">
+            <section className="order-1 border-b border-slate-200 pb-8">
               {loading ? (
                 <p className="text-sm text-gray-500">Loading settings...</p>
               ) : (
@@ -943,7 +1040,7 @@ const SettingsPage: React.FC = () => {
                       </div>
                       <button
                         type="button"
-                        className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 hover:border-camp-500"
+                        className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 hover:border-emerald-400"
                         onClick={handleResetBrand}
                       >
                         Reset to default
@@ -1004,6 +1101,135 @@ const SettingsPage: React.FC = () => {
                   </fieldset>
 
                   <fieldset className="space-y-4">
+                    <legend className="text-lg font-semibold text-gray-900">Shift setup</legend>
+                    <p className="text-sm text-gray-600">
+                      Define your service windows. Shifts control product availability, quick keys, and printing queues.
+                    </p>
+                    <div className="space-y-3">
+                      {form.shifts.map((shift, index) => (
+                        <div key={shift.id} className="rounded-lg border border-gray-200 bg-gray-50 p-4 space-y-3">
+                          <div className="flex flex-wrap items-center justify-between gap-3">
+                            <div>
+                              <p className="text-sm font-semibold text-gray-900">Shift {index + 1}</p>
+                              <p className="text-xs text-gray-500">Used for POS filters and printing.</p>
+                            </div>
+                            <button
+                              type="button"
+                              className="text-xs font-semibold text-red-600 hover:underline"
+                              onClick={() => handleRemoveShift(index)}
+                              disabled={form.shifts.length <= 1}
+                            >
+                              Remove
+                            </button>
+                          </div>
+                          <div className="grid gap-3 md:grid-cols-4">
+                            <div>
+                              <label className="text-xs font-semibold text-gray-500">ID</label>
+                              <input
+                                value={shift.id}
+                                onChange={(event) => handleShiftChange(index, 'id', event.target.value)}
+                                className="pos-input mt-1 w-full"
+                                placeholder="lunch"
+                              />
+                            </div>
+                            <div>
+                              <label className="text-xs font-semibold text-gray-500">Label</label>
+                              <input
+                                value={shift.label}
+                                onChange={(event) => handleShiftChange(index, 'label', event.target.value)}
+                                className="pos-input mt-1 w-full"
+                                placeholder="Lunch"
+                              />
+                            </div>
+                            <div>
+                              <label className="text-xs font-semibold text-gray-500">Start</label>
+                              <input
+                                type="time"
+                                value={shift.startTime}
+                                onChange={(event) => handleShiftChange(index, 'startTime', event.target.value)}
+                                className="pos-input mt-1 w-full"
+                              />
+                            </div>
+                            <div>
+                              <label className="text-xs font-semibold text-gray-500">End</label>
+                              <input
+                                type="time"
+                                value={shift.endTime}
+                                onChange={(event) => handleShiftChange(index, 'endTime', event.target.value)}
+                                className="pos-input mt-1 w-full"
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-3">
+                      <button
+                        type="button"
+                        className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700 hover:border-emerald-400"
+                        onClick={handleAddShift}
+                      >
+                        Add shift
+                      </button>
+                      <div className="flex items-center gap-2">
+                        <label className="text-sm font-medium text-gray-700" htmlFor="activeShift">
+                          Default active shift
+                        </label>
+                        <select
+                          id="activeShift"
+                          value={form.activeShiftId}
+                          onChange={(event) =>
+                            setForm((previous) => ({ ...previous, activeShiftId: event.target.value }))
+                          }
+                          className="pos-input"
+                        >
+                          {form.shifts.map((shift) => (
+                            <option key={shift.id} value={shift.id}>
+                              {shift.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  </fieldset>
+
+                  <fieldset className="space-y-4">
+                    <legend className="text-lg font-semibold text-gray-900">Printer stations</legend>
+                    <p className="text-sm text-gray-600">
+                      Define station names for kitchen or service printers.
+                    </p>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {form.printerStations.map((station) => (
+                        <span key={station} className="pill">
+                          {station}
+                          <button
+                            type="button"
+                            className="ml-1 text-xs font-semibold text-red-600"
+                            onClick={() => handleRemovePrinterStation(station)}
+                          >
+                            ×
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <input
+                        value={newPrinterStation}
+                        onChange={(event) => setNewPrinterStation(event.target.value)}
+                        className="pos-input w-full max-w-xs"
+                        placeholder="Add station (e.g., Kitchen)"
+                      />
+                      <button
+                        type="button"
+                        className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700 hover:border-emerald-400"
+                        onClick={handleAddPrinterStation}
+                      >
+                        Add station
+                      </button>
+                    </div>
+                  </fieldset>
+
+                  <fieldset className="space-y-4">
                     <legend className="text-lg font-semibold text-gray-900">Feature Toggles</legend>
                     <p className="text-sm text-gray-600">
                       Enable or disable offline-friendly capabilities and manager tools.
@@ -1022,7 +1248,7 @@ const SettingsPage: React.FC = () => {
                             type="checkbox"
                             checked={form.featureFlags[toggle.key]}
                             onChange={() => handleFeatureToggle(toggle.key)}
-                            className="mt-1 h-5 w-5 accent-camp-600"
+                            className="mt-1 h-5 w-5 accent-emerald-600"
                           />
                         </label>
                       ))}
@@ -1035,7 +1261,7 @@ const SettingsPage: React.FC = () => {
                       <span
                         className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold ${
                           adminCodeSet
-                            ? 'bg-camp-100 text-camp-700'
+                            ? 'bg-emerald-100 text-emerald-700'
                             : 'bg-gray-200 text-gray-600'
                         }`}
                       >
@@ -1105,7 +1331,7 @@ const SettingsPage: React.FC = () => {
                   <div className="flex items-center justify-end gap-3">
                     <button
                       type="button"
-                      className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 hover:border-camp-500"
+                      className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 hover:border-emerald-400"
                       disabled={saving}
                       onClick={() => void loadSettings()}
                     >

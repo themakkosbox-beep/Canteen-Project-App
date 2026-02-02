@@ -57,6 +57,9 @@ const handleWrite = async (request: NextRequest) => {
       body?.featureFlags && typeof body.featureFlags === 'object'
         ? (body.featureFlags as Record<string, unknown>)
         : undefined;
+    const shifts = Array.isArray(body?.shifts) ? body.shifts : undefined;
+    const activeShiftId = typeof body?.activeShiftId === 'string' ? body.activeShiftId : undefined;
+    const printerStations = Array.isArray(body?.printerStations) ? body.printerStations : undefined;
 
     if (typeof globalDiscountPercent === 'number' && !Number.isFinite(globalDiscountPercent)) {
       globalDiscountPercent = undefined;
@@ -99,6 +102,9 @@ const handleWrite = async (request: NextRequest) => {
               backupReminders: Boolean(featureFlags.backupReminders),
               customerQr: Boolean(featureFlags.customerQr),
             },
+      shifts: shifts,
+      activeShiftId,
+      printerStations: printerStations,
     });
 
     return NextResponse.json(nextSettings);

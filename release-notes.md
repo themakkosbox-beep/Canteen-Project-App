@@ -1,5 +1,22 @@
 # Changelog
 
+## v2.4.0 - Mon Feb 02 2026
+
+- maintenance: resolve merge conflicts and align configs
+- admin: add shift setup + printer station settings
+- ui: refine landing, POS badge, and brand assets
+- deps: align tooling versions with latest stack
+
+## v2.3.0 - Mon Jan 26 2026
+
+- Full UX refresh across landing, POS, and admin screens.
+- Updated global styles and navigation for a calmer layout.
+
+## v2.2.0 - Mon Jan 26 2026
+
+- Allow edits and voids for any transaction (admin-managed).
+- Refresh brand mark and feature toggles for offline tools.
+
 ## v2.1.2 - Tue Jan 27 2026
 
 - packaging: fix standalone server path resolution for Electron builds
@@ -17,6 +34,7 @@
 - transactions: allow edits and voids on any transaction
 - admin: add app settings feature flags for offline tools
 - branding: refresh canteen logo/icon
+- Refresh release documentation and package metadata
 - Bump version to 2.1.0
 
 ## v2.0.0 - Sat Jan 24 2026

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Dialog, Switch } from '@headlessui/react';
 import {
   AcademicCapIcon,
@@ -15,6 +15,7 @@ import {
   ProductOptionGroup,
   ProductOptionSelection,
   QuickKeySlot,
+  ShiftDefinition,
   TransactionLog,
   TransactionOptionSelection,
 } from '@/types/database';
@@ -31,6 +32,13 @@ interface TrainingCustomerState {
   customer: Customer;
   transactions: TransactionLog[];
   autoBalance: boolean;
+}
+
+interface PrintTicket {
+  id: string;
+  productName: string;
+  station: string | null;
+  timestamp: string;
 }
 
 const QUICK_KEY_COUNT = 6;
@@ -94,6 +102,19 @@ interface PurchasePreview {
 }
 
 const roundCurrency = (value: number): number => Math.round(value * 100) / 100;
+
+const isProductAvailableForShift = (product: Product, shiftId: string, shifts: ShiftDefinition[]): boolean => {
+  if (!shiftId || shifts.length === 0) {
+    return true;
+  }
+
+  const available = product.available_shift_ids;
+  if (!Array.isArray(available) || available.length === 0) {
+    return true;
+  }
+
+  return available.includes(shiftId);
+};
 
 const formatPercentLabel = (value: number): string => {
   if (!Number.isFinite(value)) {
@@ -426,6 +447,7 @@ export default function POSPage() {
   const [note, setNote] = useState('');
   const [showAdjustmentForm, setShowAdjustmentForm] = useState(false);
   const [trainingMode, setTrainingMode] = useState(false);
+  const [printQueue, setPrintQueue] = useState<PrintTicket[]>([]);
   const [trainingCustomers, setTrainingCustomers] = useState<Record<string, TrainingCustomerState>>(
     () => buildPresetTrainingCustomers()
   );
@@ -435,6 +457,7 @@ export default function POSPage() {
   const [unvoidingTransactionId, setUnvoidingTransactionId] = useState<string | null>(null);
   const [appSettings, setAppSettings] = useState<AppSettingsPayload | null>(null);
   const [appSettingsError, setAppSettingsError] = useState<string | null>(null);
+  const [activeShiftId, setActiveShiftId] = useState<string>('');
   const [exportingCsv, setExportingCsv] = useState(false);
   const [optionModalState, setOptionModalState] = useState<OptionModalState>(() =>
     createEmptyOptionModalState()
@@ -502,6 +525,17 @@ export default function POSPage() {
     }
     return details;
   }, [currencyFormatter, globalDiscount.flat, globalDiscount.percent]);
+
+  const shiftDefinitions = useMemo(() => appSettings?.shifts ?? [], [appSettings?.shifts]);
+
+  const filteredProducts = useMemo(() => {
+    if (!activeShiftId || shiftDefinitions.length === 0) {
+      return products;
+    }
+    return products.filter((product) =>
+      isProductAvailableForShift(product, activeShiftId, shiftDefinitions)
+    );
+  }, [activeShiftId, products, shiftDefinitions]);
 
   const optionPreview = useMemo<OptionEvaluationResult>(() => {
     if (!optionModalState.product) {
@@ -608,33 +642,33 @@ export default function POSPage() {
   ]);
 
   const sortedProducts = useMemo(() => {
-    return [...products].sort((a, b) => a.name.localeCompare(b.name));
-  }, [products]);
+    return [...filteredProducts].sort((a, b) => a.name.localeCompare(b.name));
+  }, [filteredProducts]);
 
   const fuse = useMemo(() => {
-    if (products.length === 0) {
+    if (filteredProducts.length === 0) {
       return null;
     }
-    return new Fuse(products, {
+    return new Fuse(filteredProducts, {
       keys: ['name', 'barcode', 'product_id'],
       threshold: 0.35,
       ignoreLocation: true,
     });
-  }, [products]);
+  }, [filteredProducts]);
 
   const productSuggestions = useMemo(() => {
-    if (!products.length) {
+    if (!filteredProducts.length) {
       return [];
     }
     const trimmed = entryInput.trim();
     if (!trimmed) {
-      return products.slice(0, 8);
+      return filteredProducts.slice(0, 8);
     }
     if (!fuse) {
       return [];
     }
     return fuse.search(trimmed).map((result) => result.item).slice(0, 8);
-  }, [entryInput, fuse, products]);
+  }, [entryInput, filteredProducts, fuse]);
 
   const trainingCustomerList = useMemo(
     () =>
@@ -644,11 +678,78 @@ export default function POSPage() {
     [trainingCustomers]
   );
 
+  const loadQuickKeys = useCallback(async (shiftId: string = activeShiftId) => {
+    setLoadingQuickKeys(true);
+    try {
+      const params = new URLSearchParams();
+      if (shiftId) {
+        params.set('shiftId', shiftId);
+      }
+      const response = await fetch(
+        `/api/settings/quick-keys${params.toString() ? `?${params}` : ''}`
+      );
+      if (!response.ok) {
+        throw new Error('Unable to load quick key settings');
+      }
+      const data = await response.json();
+      const base = createEmptyQuickKeySlots();
+      const slots: unknown = data?.slots;
+
+      if (Array.isArray(slots)) {
+        slots.forEach((slot) => {
+          if (!slot || typeof slot !== 'object') {
+            return;
+          }
+
+          const index = Number((slot as { index?: unknown }).index);
+          if (!Number.isInteger(index) || index < 0 || index >= QUICK_KEY_COUNT) {
+            return;
+          }
+
+          const productId = (slot as { productId?: unknown }).productId;
+          const product = (slot as { product?: unknown }).product as Product | null | undefined;
+
+          base[index] = {
+            index,
+            productId:
+              typeof productId === 'string' && productId.trim().length > 0
+                ? productId.trim()
+                : null,
+            product: product ?? null,
+          };
+        });
+      }
+
+      setQuickKeySlots(base);
+    } catch (error) {
+      console.error('Failed to load quick keys', error);
+      setQuickKeySlots(createEmptyQuickKeySlots());
+    } finally {
+      setLoadingQuickKeys(false);
+    }
+  }, [activeShiftId]);
+
   useEffect(() => {
     void loadQuickKeys();
     void loadProducts();
     void loadAppSettings();
-  }, []);
+  }, [loadQuickKeys]);
+
+  useEffect(() => {
+    if (!activeShiftId) {
+      return;
+    }
+    void loadQuickKeys(activeShiftId);
+  }, [activeShiftId, loadQuickKeys]);
+
+  useEffect(() => {
+    if (shiftDefinitions.length === 0) {
+      return;
+    }
+    if (!shiftDefinitions.some((shift) => shift.id === activeShiftId)) {
+      setActiveShiftId(shiftDefinitions[0].id);
+    }
+  }, [activeShiftId, shiftDefinitions]);
 
   useEffect(() => {
     setState({ ...INITIAL_POS_STATE });
@@ -656,13 +757,14 @@ export default function POSPage() {
     setEntryInput('');
     setDepositAmount('');
     setAdjustmentAmount('');
-  setNote('');
+    setNote('');
     setShowAdjustmentForm(false);
     if (trainingMode) {
       setTrainingCustomers(buildPresetTrainingCustomers());
     }
     setActiveTrainingCustomerId(null);
     setOptionModalState(createEmptyOptionModalState());
+    setPrintQueue([]);
   }, [trainingMode]);
 
   useEffect(() => {
@@ -732,51 +834,6 @@ export default function POSPage() {
     return () => window.clearInterval(interval);
   }, []);
 
-  const loadQuickKeys = async () => {
-    setLoadingQuickKeys(true);
-    try {
-      const response = await fetch('/api/settings/quick-keys');
-      if (!response.ok) {
-        throw new Error('Unable to load quick key settings');
-      }
-      const data = await response.json();
-      const base = createEmptyQuickKeySlots();
-      const slots: unknown = data?.slots;
-
-      if (Array.isArray(slots)) {
-        slots.forEach((slot) => {
-          if (!slot || typeof slot !== 'object') {
-            return;
-          }
-
-          const index = Number((slot as { index?: unknown }).index);
-          if (!Number.isInteger(index) || index < 0 || index >= QUICK_KEY_COUNT) {
-            return;
-          }
-
-          const productId = (slot as { productId?: unknown }).productId;
-          const product = (slot as { product?: unknown }).product as Product | null | undefined;
-
-          base[index] = {
-            index,
-            productId:
-              typeof productId === 'string' && productId.trim().length > 0
-                ? productId.trim()
-                : null,
-            product: product ?? null,
-          };
-        });
-      }
-
-      setQuickKeySlots(base);
-    } catch (error) {
-      console.error('Failed to load quick keys', error);
-      setQuickKeySlots(createEmptyQuickKeySlots());
-    } finally {
-      setLoadingQuickKeys(false);
-    }
-  };
-
   const loadProducts = async () => {
     setProductsLoading(true);
     try {
@@ -803,6 +860,7 @@ export default function POSPage() {
       }
       const data: AppSettingsPayload = await response.json();
       setAppSettings(data);
+      setActiveShiftId((prev) => prev || data.activeShiftId || data.shifts[0]?.id || '');
       setAppSettingsError(null);
     } catch (error) {
       console.error('Failed to load app settings', error);
@@ -813,14 +871,30 @@ export default function POSPage() {
 
   const resolveProductById = (productId: string): Product | null => {
     return (
-      products.find((product) => product.product_id === productId) ||
+      filteredProducts.find((product) => product.product_id === productId) ||
       quickKeySlots.find((slot) => slot.product?.product_id === productId)?.product ||
       null
     );
   };
 
   const resolveProductByBarcode = (barcode: string): Product | null => {
-    return products.find((product) => product.barcode === barcode) ?? null;
+    return filteredProducts.find((product) => product.barcode === barcode) ?? null;
+  };
+
+  const enqueuePrintTicket = (product: Product) => {
+    if (!product.auto_print) {
+      return;
+    }
+    const timestamp = new Date().toISOString();
+    setPrintQueue((prev) => [
+      {
+        id: `${product.product_id}-${timestamp}`,
+        productName: product.name,
+        station: product.printer_station ?? null,
+        timestamp,
+      },
+      ...prev,
+    ]);
   };
 
   const clearEntryInput = () => {
@@ -1052,11 +1126,19 @@ export default function POSPage() {
         transactions: [transaction, ...current.transactions].slice(0, MAX_TRAINING_TRANSACTIONS),
         autoBalance: current.autoBalance,
       }));
+      enqueuePrintTicket(product);
       clearEntryInput();
       return true;
     }
 
     try {
+      const resolvedProduct =
+        productOverride ??
+        (productId
+          ? resolveProductById(productId)
+          : barcode
+          ? resolveProductByBarcode(barcode)
+          : null);
       const payload = {
         customerId,
         barcode,
@@ -1079,6 +1161,9 @@ export default function POSPage() {
         throw new Error(message);
       }
 
+      if (resolvedProduct) {
+        enqueuePrintTicket(resolvedProduct);
+      }
       await loadCustomer(customerId);
       clearEntryInput();
       return true;
@@ -1292,8 +1377,20 @@ export default function POSPage() {
       setState((prev) => ({ ...prev, error: 'Quick key product is unavailable' }));
       return;
     }
+    if (!isProductAvailableForShift(product, activeShiftId, shiftDefinitions)) {
+      setState((prev) => ({ ...prev, error: 'This product is not available for the current shift' }));
+      return;
+    }
 
     startProductPurchase(product, { productId: product.product_id });
+  };
+
+  const handleClearPrintQueue = () => {
+    setPrintQueue([]);
+  };
+
+  const handleMarkTicketPrinted = (ticketId: string) => {
+    setPrintQueue((prev) => prev.filter((ticket) => ticket.id !== ticketId));
   };
 
   const openPurchaseEditModal = (transaction: TransactionLog) => {
@@ -1702,7 +1799,7 @@ export default function POSPage() {
   const toggleClass = (enabled: boolean) =>
     `inline-flex items-center gap-2 rounded-full border px-4 py-1 text-sm font-semibold transition ${
       enabled
-        ? 'border-camp-600 bg-camp-600 text-white shadow-sm'
+        ? 'border-emerald-600 bg-emerald-600 text-white shadow-sm'
         : 'border-gray-300 text-gray-600 hover:border-gray-400'
     }`;
 
@@ -1765,7 +1862,7 @@ export default function POSPage() {
       return (
         <button
           key={slot.index}
-          className="h-24 w-full rounded-xl border border-dashed border-gray-300 bg-white text-gray-400"
+          className="h-24 w-full rounded-2xl border border-dashed border-gray-200 bg-white text-gray-400"
           type="button"
         >
           Empty
@@ -1773,30 +1870,38 @@ export default function POSPage() {
       );
     }
 
+    const available = isProductAvailableForShift(product, activeShiftId, shiftDefinitions);
+
     return (
       <button
         key={slot.index}
-        className="flex h-24 w-full flex-col justify-between overflow-hidden rounded-xl border border-gray-200 bg-white p-3 text-left shadow hover:border-camp-500 hover:shadow-md"
-        onClick={() => handleQuickKeyPurchase(slot)}
+        className={`flex h-24 w-full flex-col justify-between overflow-hidden rounded-2xl border border-gray-200 bg-white p-3 text-left shadow-soft ${
+          available ? 'hover:border-emerald-500 hover:shadow-md' : 'opacity-60'
+        }`}
+        onClick={() => available && handleQuickKeyPurchase(slot)}
+        disabled={!available}
         type="button"
       >
-        <span className="font-semibold text-gray-800 truncate">{product.name}</span>
+        <span className="truncate font-semibold text-gray-800">{product.name}</span>
         <div className="flex items-center justify-between text-sm text-gray-500">
           <span>{formatCurrency(product.price)}</span>
-          {product.category ? <span className="rounded-full bg-camp-50 px-2 py-0.5 text-xs text-camp-600">{product.category}</span> : null}
+          {product.category ? <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-xs text-emerald-600">{product.category}</span> : null}
         </div>
+        {!available ? (
+          <span className="text-xs font-semibold text-amber-700">Unavailable this shift</span>
+        ) : null}
       </button>
     );
   };
 
   const renderQuickKeyGrid = () => {
     if (loadingQuickKeys) {
-      return <div className="rounded-xl border border-gray-200 bg-white p-6 text-center text-gray-500">Loading quick keys...</div>;
+      return <div className="rounded-2xl border border-gray-200 bg-white p-6 text-center text-gray-500">Loading quick keys...</div>;
     }
 
     if (!filteredQuickKeys.length) {
       return (
-        <div className="rounded-xl border border-gray-200 bg-white p-6 text-center text-gray-500">
+        <div className="rounded-2xl border border-gray-200 bg-white p-6 text-center text-gray-500">
           No quick keys configured. Configure them in Settings {'>'} Quick Keys.
         </div>
       );
@@ -1828,18 +1933,21 @@ export default function POSPage() {
   );
   const shellClassName = trainingMode
     ? 'flex min-h-screen flex-col bg-amber-50'
-    : 'flex min-h-screen flex-col bg-gray-50';
+    : 'flex min-h-screen flex-col';
 
   return (
     <div className={shellClassName}>
-      <header className="border-b border-gray-200 bg-white">
-        <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
+      <header className="border-b border-slate-200 bg-white/90 backdrop-blur">
+        <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-5">
           <div>
-            <h1 className="text-lg font-semibold text-gray-900">Point of Sale</h1>
-            <p className="text-sm text-gray-500">Scan barcodes, use quick keys, or search products to charge customers.</p>
+            <p className="text-xs font-semibold uppercase tracking-[0.3em] text-emerald-600">Register</p>
+            <h1 className="page-title mt-2">Checkout workspace</h1>
+            <p className="text-sm text-gray-500">
+              Designed for quick handoffs, minimal clicks, and clean receipts.
+            </p>
             <time
               aria-live="polite"
-              className="mt-2 block text-sm font-semibold text-gray-600 sm:hidden"
+              className="mt-2 block text-sm font-semibold text-slate-600 sm:hidden"
               dateTime={currentTime.toISOString()}
             >
               {formattedCurrentTime}
@@ -1847,18 +1955,37 @@ export default function POSPage() {
           </div>
           <div className="flex items-center gap-3">
             {appSettings?.featureFlags?.offlineStatus ? (
-              <span className="hidden items-center gap-2 rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700 sm:inline-flex">
+              <span className="badge-soft hidden sm:inline-flex">
                 <span className="h-2 w-2 rounded-full bg-emerald-500" aria-hidden="true" />
-                Offline ready
+                Offline mode ready
               </span>
             ) : null}
             <time
               aria-live="polite"
-              className="hidden text-sm font-semibold text-gray-600 sm:block"
+              className="hidden text-sm font-semibold text-slate-600 sm:block"
               dateTime={currentTime.toISOString()}
             >
               {formattedCurrentTime}
             </time>
+            {shiftDefinitions.length > 0 ? (
+              <div className="flex flex-col items-end gap-1 text-xs text-gray-500">
+                <label htmlFor="shift-select" className="font-semibold uppercase tracking-[0.2em] text-emerald-600">
+                  Shift
+                </label>
+                <select
+                  id="shift-select"
+                  className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-semibold text-gray-700 shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-200"
+                  value={activeShiftId}
+                  onChange={(event) => setActiveShiftId(event.target.value)}
+                >
+                  {shiftDefinitions.map((shift) => (
+                    <option key={shift.id} value={shift.id}>
+                      {shift.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
             <button
               className={toggleClass(trainingMode)}
               onClick={() => setTrainingMode((prev) => !prev)}
@@ -1877,19 +2004,19 @@ export default function POSPage() {
       ) : null}
       <main className="flex w-full flex-1 flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8">
         {appSettingsError ? (
-          <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
             {appSettingsError}
           </div>
         ) : null}
 
         {globalDiscountActive ? (
-          <section className="rounded-lg border border-camp-200 bg-camp-50 px-4 py-3 text-sm text-camp-800">
+          <section className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-              <span className="font-semibold text-camp-900">
+              <span className="font-semibold text-emerald-900">
                 Global discount currently applies to all purchases.
               </span>
               {globalDiscountSummary ? (
-                <span className="inline-flex items-center rounded-full bg-white px-3 py-1 text-xs font-semibold text-camp-700 shadow-sm">
+                <span className="inline-flex items-center rounded-full bg-white px-3 py-1 text-xs font-semibold text-emerald-700 shadow-sm">
                   {globalDiscountSummary}
                 </span>
               ) : null}
@@ -1897,7 +2024,7 @@ export default function POSPage() {
             {globalDiscountDetails.length ? (
               <ul className="mt-2 list-disc space-y-1 pl-5">
                 {globalDiscountDetails.map((detail) => (
-                  <li key={detail} className="text-xs text-camp-700">
+                  <li key={detail} className="text-xs text-emerald-700">
                     {detail}
                   </li>
                 ))}
@@ -1906,36 +2033,41 @@ export default function POSPage() {
           </section>
         ) : null}
 
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(320px,1fr)_minmax(520px,760px)] xl:grid-cols-[minmax(320px,1fr)_minmax(520px,760px)_minmax(320px,1fr)] xl:items-start">
-          <section className="rounded-xl border border-gray-200 bg-white p-6 shadow xl:col-start-1 xl:row-start-1">
-            <div className="flex items-center justify-between">
-              <div>
-                <h2 className="text-base font-semibold text-gray-900">Quick Keys</h2>
-                <p className="text-sm text-gray-500">Pre-configured products for rapid checkout.</p>
-              </div>
-              <button
-                className="rounded-full border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-600 shadow hover:border-camp-500"
-                onClick={() => {
-                  setTrainingMode((prev) => prev);
-                  void loadQuickKeys();
-                }}
-                type="button"
-              >
-                Refresh
-              </button>
+        <section className="pb-6 border-b border-slate-200">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.3em] text-emerald-600">Register status</p>
+              <h2 className="mt-2 text-lg font-semibold text-gray-900">Ready for the next guest</h2>
+              <p className="text-sm text-gray-500">
+                Use shortcuts for speed and keep training mode separate from live sales.
+              </p>
             </div>
-            <div className="mt-4 rounded-lg border border-gray-200 bg-white p-4">
-              {canUseQuickKeys ? (
-                renderQuickKeyGrid()
-              ) : (
-                <div className="rounded-lg border border-dashed border-gray-300 p-4 text-center text-gray-500">
-                  Lookup a customer to enable quick keys.
-                </div>
-              )}
+            <div className="flex flex-wrap gap-2 text-xs text-gray-500">
+              <span className="pill">Ctrl+Shift+1 Customer</span>
+              <span className="pill">Ctrl+Shift+2 Search</span>
+              <span className="pill">Ctrl+Shift+3 Deposit</span>
+              <span className="pill">Ctrl+Shift+4 Adjustment</span>
             </div>
-          </section>
+          </div>
+        </section>
 
-          <section className="rounded-xl border border-gray-200 bg-white p-6 shadow lg:col-start-2 lg:row-start-1 xl:col-start-2">
+        <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(560px,1.4fr)_minmax(320px,1fr)] xl:items-start">
+          <section className="pb-8 border-b border-slate-200 xl:col-start-1 xl:row-start-1">
+              <div className="mb-5 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <h2 className="text-base font-semibold text-gray-900">Register flow</h2>
+                  <p className="text-sm text-gray-500">Two steps: pick a customer, then charge items.</p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="pill">Step 1: Customer</span>
+                  <span className="pill">Step 2: Item or barcode</span>
+                  <span className="pill">
+                    {state.currentCustomer
+                      ? `Active: ${state.currentCustomer.name ?? 'Customer'} #${state.currentCustomer.customer_id}`
+                      : 'No customer selected'}
+                  </span>
+                </div>
+              </div>
               <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
                 <div className="flex flex-1 flex-col gap-3">
                   <label className="text-sm font-medium text-gray-700" htmlFor="customerId">
@@ -1944,7 +2076,7 @@ export default function POSPage() {
                   <div className="flex gap-3">
                     <input
                       autoFocus
-                      className="w-full rounded-lg border border-gray-300 px-4 py-2 text-lg shadow-sm focus:border-camp-500 focus:outline-none focus:ring-2 focus:ring-camp-200"
+                      className="w-full rounded-lg border border-gray-300 px-4 py-2 text-lg shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-200"
                       id="customerId"
                       maxLength={4}
                       minLength={4}
@@ -1959,7 +2091,7 @@ export default function POSPage() {
                       value={customerIdInput}
                     />
                     <button
-                      className="rounded-lg bg-camp-600 px-4 py-2 font-semibold text-white shadow hover:bg-camp-700"
+                      className="rounded-lg bg-emerald-600 px-4 py-2 font-semibold text-white shadow hover:bg-emerald-700"
                       onClick={() => loadCustomer(customerIdInput)}
                       type="button"
                     >
@@ -1981,7 +2113,7 @@ export default function POSPage() {
                           }));
                         }}
                         className={`${
-                          activeTrainingAutoBalance ? 'bg-camp-600' : 'bg-gray-300'
+                          activeTrainingAutoBalance ? 'bg-emerald-600' : 'bg-gray-300'
                         } relative inline-flex h-6 w-11 items-center rounded-full transition`}
                       >
                         <span className="sr-only">Toggle auto-balance</span>
@@ -2003,7 +2135,7 @@ export default function POSPage() {
                   <div className="relative">
                     <div className="flex gap-3">
                       <input
-                        className="w-full rounded-lg border border-gray-300 px-4 py-2 text-lg shadow-sm focus:border-camp-500 focus:outline-none focus:ring-2 focus:ring-camp-200"
+                        className="w-full rounded-lg border border-gray-300 px-4 py-2 text-lg shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-200"
                         id="charge-input"
                         onBlur={() => setTimeout(() => setShowProductDropdown(false), 150)}
                         onChange={(event) => {
@@ -2024,7 +2156,7 @@ export default function POSPage() {
                         value={entryInput}
                       />
                       <button
-                        className="rounded-lg border border-gray-300 px-4 py-2 font-semibold text-gray-600 shadow hover:border-camp-500"
+                        className="rounded-lg border border-gray-300 px-4 py-2 font-semibold text-gray-600 shadow hover:border-emerald-500"
                         disabled={!state.currentCustomer || !entryInput.trim() || state.isLoading}
                         onClick={handlePrimaryCharge}
                         type="button"
@@ -2040,7 +2172,7 @@ export default function POSPage() {
                         {productSuggestions.map((product) => (
                           <button
                             key={product.product_id}
-                            className="flex w-full items-center justify-between px-4 py-2 text-left text-sm hover:bg-camp-50"
+                            className="flex w-full items-center justify-between px-4 py-2 text-left text-sm hover:bg-emerald-50"
                             onClick={() => {
                               if (!state.currentCustomer || state.isLoading) {
                                 return;
@@ -2062,7 +2194,7 @@ export default function POSPage() {
                 </div>
               </div>
               <p className="mt-3 text-xs text-gray-500">
-                Shortcuts: Ctrl+Shift+1 customer lookup, Ctrl+Shift+2 scan/search, Ctrl+Shift+3 deposit, Ctrl+Shift+4 adjustment.
+                Tip: keep the cursor in the search field to charge scanned barcodes instantly.
               </p>
 
               {productsLoading ? (
@@ -2075,7 +2207,7 @@ export default function POSPage() {
                     Press Enter to charge a scanned barcode immediately, or pick from the suggestions below.
                   </p>
                   <button
-                    className="self-start rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-600 shadow hover:border-camp-500 sm:self-auto"
+                    className="self-start rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-600 shadow hover:border-emerald-500 sm:self-auto"
                     disabled={state.isLoading}
                     onClick={clearEntryInput}
                     type="button"
@@ -2086,16 +2218,44 @@ export default function POSPage() {
               )}
             </section>
 
-          <aside className="space-y-6 lg:col-span-2 lg:row-start-2 xl:col-span-1 xl:col-start-3 xl:row-start-1">
-            <section className="rounded-xl border border-gray-200 bg-white p-6 shadow">
+          <section className="pb-8 border-b border-slate-200 xl:col-start-1 xl:row-start-2">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-base font-semibold text-gray-900">Quick Keys</h2>
+                <p className="text-sm text-gray-500">Tap the most common items with one click.</p>
+              </div>
+              <button
+                className="rounded-full border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-600 shadow hover:border-emerald-500"
+                onClick={() => {
+                  setTrainingMode((prev) => prev);
+                  void loadQuickKeys(activeShiftId);
+                }}
+                type="button"
+              >
+                Refresh
+              </button>
+            </div>
+            <div className="mt-4 rounded-lg border border-gray-200 bg-white p-4">
+              {canUseQuickKeys ? (
+                renderQuickKeyGrid()
+              ) : (
+                <div className="rounded-lg border border-dashed border-gray-300 p-4 text-center text-gray-500">
+                  Lookup a customer to enable quick keys.
+                </div>
+              )}
+            </div>
+          </section>
+
+          <aside className="space-y-6 xl:col-start-2 xl:row-span-2">
+            <section className="pb-8 border-b border-slate-200">
               <div className="flex items-center justify-between">
                 <div>
-                  <h2 className="text-base font-semibold text-gray-900">Customer</h2>
-                  <p className="text-sm text-gray-500">Details and balance overview.</p>
+                  <h2 className="text-base font-semibold text-gray-900">Customer snapshot</h2>
+                  <p className="text-sm text-gray-500">Balance and account details.</p>
                 </div>
                 {state.currentCustomer ? (
                   <button
-                    className="text-sm font-semibold text-camp-600 hover:text-camp-700"
+                    className="text-sm font-semibold text-emerald-600 hover:text-emerald-700"
                     onClick={() => {
                       setState({ ...INITIAL_POS_STATE });
                       setCustomerIdInput('');
@@ -2119,7 +2279,7 @@ export default function POSPage() {
                       <p className="text-sm font-medium text-gray-700">{state.currentCustomer.name}</p>
                       <p className="text-xs text-gray-500">ID: {state.currentCustomer.customer_id}</p>
                     </div>
-                    <span className="rounded-full bg-camp-50 px-3 py-1 text-sm font-semibold text-camp-600">
+                    <span className="rounded-full bg-emerald-50 px-3 py-1 text-sm font-semibold text-emerald-600">
                       {formatCurrency(state.currentCustomer.balance)}
                     </span>
                   </div>
@@ -2142,21 +2302,21 @@ export default function POSPage() {
                   </div>
                 </div>
               ) : (
-                <div className="mt-4 rounded-lg border border-dashed border-gray-300 p-4 text-center text-gray-500">
+                <div className="mt-4 rounded-2xl border border-dashed border-gray-200 p-4 text-center text-gray-500">
                   Lookup a customer to begin.
                 </div>
               )}
 
               {state.error ? (
-                <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+                <div className="mt-4 rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
                   {state.error}
                 </div>
               ) : null}
             </section>
 
-            <section className="rounded-xl border border-gray-200 bg-white p-6 shadow">
-              <h2 className="text-base font-semibold text-gray-900">Balance Actions</h2>
-              <p className="text-sm text-gray-500">Deposits, adjustments, and training scenarios.</p>
+            <section className="pb-8 border-b border-slate-200">
+              <h2 className="text-base font-semibold text-gray-900">Wallet tools</h2>
+              <p className="text-sm text-gray-500">Deposit funds or apply corrections.</p>
               <div className="mt-4 space-y-4">
                 <div>
                   <label className="text-sm font-medium text-gray-700" htmlFor="deposit">
@@ -2164,7 +2324,7 @@ export default function POSPage() {
                   </label>
                   <div className="mt-2 flex gap-3">
                     <input
-                      className="w-full rounded-lg border border-gray-300 px-4 py-2 text-base shadow-sm focus:border-camp-500 focus:outline-none focus:ring-2 focus:ring-camp-200"
+                      className="w-full rounded-lg border border-gray-300 px-4 py-2 text-base shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-200"
                       disabled={!state.currentCustomer}
                       id="deposit"
                       onChange={(event) => setDepositAmount(event.target.value)}
@@ -2174,7 +2334,7 @@ export default function POSPage() {
                       value={depositAmount}
                     />
                     <button
-                      className="rounded-lg bg-camp-600 px-4 py-2 font-semibold text-white shadow hover:bg-camp-700"
+                      className="rounded-lg bg-emerald-600 px-4 py-2 font-semibold text-white shadow hover:bg-emerald-700"
                       disabled={!state.currentCustomer || state.isLoading}
                       onClick={() => void processDeposit()}
                       type="button"
@@ -2185,12 +2345,12 @@ export default function POSPage() {
                 </div>
 
                 <div>
-                  <button
-                    className="flex items-center gap-2 text-sm font-semibold text-camp-600 hover:text-camp-700"
-                    disabled={!state.currentCustomer}
-                    onClick={() => setShowAdjustmentForm((prev) => !prev)}
-                    type="button"
-                  >
+                    <button
+                      className="flex items-center gap-2 text-sm font-semibold text-emerald-600 hover:text-emerald-700"
+                      disabled={!state.currentCustomer}
+                      onClick={() => setShowAdjustmentForm((prev) => !prev)}
+                      type="button"
+                    >
                     <AdjustmentsHorizontalIcon className="h-4 w-4" />
                     {showAdjustmentForm ? 'Hide Adjustment' : 'Manual Adjustment'}
                   </button>
@@ -2201,7 +2361,7 @@ export default function POSPage() {
                       </label>
                       <div className="mt-2 flex gap-3">
                         <input
-                          className="w-full rounded-lg border border-gray-300 px-4 py-2 text-base shadow-sm focus:border-camp-500 focus:outline-none focus:ring-2 focus:ring-camp-200"
+                          className="w-full rounded-lg border border-gray-300 px-4 py-2 text-base shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-200"
                           id="adjustment"
                           onChange={(event) => setAdjustmentAmount(event.target.value)}
                           placeholder="Positive or negative amount"
@@ -2210,7 +2370,7 @@ export default function POSPage() {
                           value={adjustmentAmount}
                         />
                         <button
-                          className="rounded-lg bg-camp-600 px-4 py-2 font-semibold text-white shadow hover:bg-camp-700"
+                          className="rounded-lg bg-emerald-600 px-4 py-2 font-semibold text-white shadow hover:bg-emerald-700"
                           disabled={!state.currentCustomer || state.isLoading}
                           onClick={() => void processAdjustment()}
                           type="button"
@@ -2227,7 +2387,7 @@ export default function POSPage() {
                     Note (optional)
                   </label>
                   <textarea
-                    className="mt-2 w-full rounded-lg border border-gray-300 px-4 py-2 text-sm shadow-sm focus:border-camp-500 focus:outline-none focus:ring-2 focus:ring-camp-200"
+                    className="mt-2 w-full rounded-lg border border-gray-300 px-4 py-2 text-sm shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-200"
                     id="note"
                     onChange={(event) => setNote(event.target.value)}
                     placeholder="Add context for this transaction"
@@ -2237,11 +2397,11 @@ export default function POSPage() {
                 </div>
 
                 {canUseTrainingActions ? (
-                  <div className="space-y-3 rounded-lg border border-camp-200 bg-camp-50 p-4 text-sm">
-                    <p className="font-semibold text-camp-700">Training Scenarios</p>
+                  <div className="space-y-3 rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm">
+                    <p className="font-semibold text-emerald-700">Training Scenarios</p>
                     <div className="flex flex-wrap items-center gap-2">
                       <button
-                        className="rounded-full border border-camp-300 px-3 py-1 text-xs font-semibold text-camp-700 hover:border-camp-400"
+                        className="rounded-full border border-emerald-300 px-3 py-1 text-xs font-semibold text-emerald-700 hover:border-emerald-400"
                         onClick={() => {
                           if (!state.currentCustomer) {
                             return;
@@ -2257,7 +2417,7 @@ export default function POSPage() {
                         Reset Balance to $100
                       </button>
                       <button
-                        className="rounded-full border border-camp-300 px-3 py-1 text-xs font-semibold text-camp-700 hover:border-camp-400"
+                        className="rounded-full border border-emerald-300 px-3 py-1 text-xs font-semibold text-emerald-700 hover:border-emerald-400"
                         onClick={() => {
                           if (!state.currentCustomer) {
                             return;
@@ -2277,7 +2437,7 @@ export default function POSPage() {
                         Add $25 Allowance
                       </button>
                       <button
-                        className="rounded-full border border-camp-300 px-3 py-1 text-xs font-semibold text-camp-700 hover:border-camp-400"
+                        className="rounded-full border border-emerald-300 px-3 py-1 text-xs font-semibold text-emerald-700 hover:border-emerald-400"
                         onClick={() => {
                           if (!state.currentCustomer) {
                             return;
@@ -2298,14 +2458,67 @@ export default function POSPage() {
               </div>
             </section>
 
-            <section className="rounded-xl border border-gray-200 bg-white p-6 shadow">
+            <section className="pb-8 border-b border-slate-200">
               <div className="flex items-center justify-between">
                 <div>
-                  <h2 className="text-base font-semibold text-gray-900">Recent Activity</h2>
-                  <p className="text-sm text-gray-500">Latest transactions for this customer.</p>
+                  <h2 className="text-base font-semibold text-gray-900">Print queue</h2>
+                  <p className="text-sm text-gray-500">
+                    Auto-print tickets for items flagged to print.
+                  </p>
+                </div>
+                {printQueue.length > 0 ? (
+                  <button
+                    className="text-sm font-semibold text-emerald-600 hover:text-emerald-700"
+                    onClick={handleClearPrintQueue}
+                    type="button"
+                  >
+                    Clear all
+                  </button>
+                ) : null}
+              </div>
+              {printQueue.length === 0 ? (
+                <div className="mt-4 rounded-lg border border-dashed border-gray-300 p-4 text-center text-gray-500">
+                  No tickets waiting to print.
+                </div>
+              ) : (
+                <div className="mt-4 space-y-3">
+                  {printQueue.map((ticket) => (
+                    <div
+                      key={ticket.id}
+                      className="rounded-lg border border-gray-200 bg-gray-50 p-3"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-sm font-semibold text-gray-800">{ticket.productName}</p>
+                          <p className="text-xs text-gray-500">
+                            Station: {ticket.station ?? 'Unassigned'}
+                          </p>
+                        </div>
+                        <button
+                          className="rounded-full border border-gray-300 px-3 py-1 text-xs font-semibold text-gray-600 shadow-sm hover:border-emerald-500 hover:text-emerald-700"
+                          onClick={() => handleMarkTicketPrinted(ticket.id)}
+                          type="button"
+                        >
+                          Mark printed
+                        </button>
+                      </div>
+                      <p className="mt-2 text-xs text-gray-500">
+                        {new Date(ticket.timestamp).toLocaleDateString()} • {formatTime(ticket.timestamp)}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+
+            <section className="pb-8 border-b border-slate-200">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-base font-semibold text-gray-900">Customer activity</h2>
+                  <p className="text-sm text-gray-500">Most recent charges, deposits, and edits.</p>
                 </div>
                 <button
-                  className="text-sm font-semibold text-camp-600 hover:text-camp-700 disabled:opacity-60"
+                  className="text-sm font-semibold text-emerald-600 hover:text-emerald-700 disabled:opacity-60"
                   disabled={exportingCsv}
                   onClick={exportTransactionsToCsv}
                   type="button"
@@ -2323,7 +2536,7 @@ export default function POSPage() {
               ) : null}
 
               {!trainingMode && globalDiscountActive ? (
-                <p className="mt-2 text-xs font-semibold text-camp-700">
+                <p className="mt-2 text-xs font-semibold text-emerald-700">
                   Global discount is active - recent totals already include the automatic adjustment.
                 </p>
               ) : null}
@@ -2356,7 +2569,7 @@ export default function POSPage() {
                       canUnvoid && unvoidingTransactionId === transaction.transaction_id;
                     const amountClass = transaction.voided
                       ? 'text-sm font-semibold text-gray-400 line-through'
-                      : `text-sm font-semibold ${amountPositive ? 'text-camp-600' : 'text-red-600'}`;
+                      : `text-sm font-semibold ${amountPositive ? 'text-emerald-600' : 'text-red-600'}`;
                     const isEdited = Boolean(transaction.edit_parent_transaction_id);
                     const baseLabel = transaction.type === 'purchase'
                       ? transaction.product_name ?? 'Purchase'
@@ -2372,7 +2585,7 @@ export default function POSPage() {
                     return (
                       <div
                         key={transaction.id}
-                        className="rounded-lg border border-gray-200 bg-gray-50 p-4"
+                        className="rounded-2xl border border-gray-200 bg-gray-50 p-4"
                       >
                         <div className="flex items-start justify-between gap-3">
                           <div>
@@ -2411,7 +2624,7 @@ export default function POSPage() {
                                 : `-${formatCurrency(Math.abs(transaction.amount))}`}
                             </span>
                             {isEdited ? (
-                              <span className="rounded-full bg-blue-100 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-blue-700">
+                              <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-emerald-700">
                                 Edited
                               </span>
                             ) : null}
@@ -2422,7 +2635,7 @@ export default function POSPage() {
                             ) : null}
                             {canEditPurchase ? (
                               <button
-                                className="rounded-full border border-gray-300 px-3 py-1 text-xs font-semibold text-gray-600 shadow-sm hover:border-camp-500 hover:text-camp-700"
+                                className="rounded-full border border-gray-300 px-3 py-1 text-xs font-semibold text-gray-600 shadow-sm hover:border-emerald-500 hover:text-emerald-700"
                                 disabled={state.isLoading}
                                 onClick={() => openPurchaseEditModal(transaction)}
                                 type="button"
@@ -2432,7 +2645,7 @@ export default function POSPage() {
                             ) : null}
                             {!canEditPurchase && canEditBalanceDelta ? (
                               <button
-                                className="rounded-full border border-gray-300 px-3 py-1 text-xs font-semibold text-gray-600 shadow-sm hover:border-camp-500 hover:text-camp-700"
+                                className="rounded-full border border-gray-300 px-3 py-1 text-xs font-semibold text-gray-600 shadow-sm hover:border-emerald-500 hover:text-emerald-700"
                                 disabled={state.isLoading}
                                 onClick={() => openBalanceEditModal(transaction)}
                                 type="button"
@@ -2452,7 +2665,7 @@ export default function POSPage() {
                             ) : null}
                             {canUnvoid ? (
                               <button
-                                className="rounded-full border border-gray-300 px-3 py-1 text-xs font-semibold text-gray-600 shadow-sm hover:border-camp-400 hover:text-camp-700"
+                                className="rounded-full border border-gray-300 px-3 py-1 text-xs font-semibold text-gray-600 shadow-sm hover:border-emerald-400 hover:text-emerald-700"
                                 disabled={isUnvoiding || state.isLoading}
                                 onClick={() => handleUnvoidTransaction(transaction)}
                                 type="button"
@@ -2480,7 +2693,7 @@ export default function POSPage() {
             </section>
 
             {trainingMode ? (
-              <section className="rounded-xl border border-gray-200 bg-white p-6 shadow">
+              <section className="pb-8 border-b border-slate-200">
                 <h2 className="text-base font-semibold text-gray-900">Training Customers</h2>
                 <p className="text-sm text-gray-500">
                   Quickly load preset customers with different balances.
@@ -2491,8 +2704,8 @@ export default function POSPage() {
                       key={entry.customer.customer_id}
                       className={`flex items-center justify-between rounded-lg border px-4 py-3 text-left shadow-sm transition ${
                         activeTrainingCustomerId === entry.customer.customer_id
-                          ? 'border-camp-500 bg-camp-50'
-                          : 'border-gray-200 bg-white hover:border-camp-400'
+                          ? 'border-emerald-500 bg-emerald-50'
+                          : 'border-gray-200 bg-white hover:border-emerald-400'
                       }`}
                       onClick={() => {
                         void loadCustomer(entry.customer.customer_id);
@@ -2503,7 +2716,7 @@ export default function POSPage() {
                         <p className="text-sm font-semibold text-gray-800">{entry.customer.name}</p>
                         <p className="text-xs text-gray-500">ID: {entry.customer.customer_id}</p>
                       </div>
-                      <span className="rounded-full bg-camp-100 px-3 py-1 text-sm font-semibold text-camp-700">
+                      <span className="rounded-full bg-emerald-100 px-3 py-1 text-sm font-semibold text-emerald-700">
                         {formatCurrency(entry.customer.balance)}
                       </span>
                     </button>
@@ -2542,7 +2755,7 @@ export default function POSPage() {
                           <p className="text-sm font-semibold text-gray-800">{group.name}</p>
                           <div className="flex items-center gap-2 text-xs">
                             {group.required ? (
-                              <span className={missing ? 'font-semibold text-red-600' : 'font-semibold text-camp-600'}>
+                              <span className={missing ? 'font-semibold text-red-600' : 'font-semibold text-emerald-600'}>
                                 Required
                               </span>
                             ) : (
@@ -2567,8 +2780,8 @@ export default function POSPage() {
                                 key={choice.id}
                                 className={`flex flex-col items-start rounded-lg border px-3 py-2 text-left text-sm transition ${
                                   isSelected
-                                    ? 'border-camp-500 bg-camp-50 text-camp-700 shadow'
-                                    : 'border-gray-200 bg-white text-gray-700 hover:border-camp-400'
+                                    ? 'border-emerald-500 bg-emerald-50 text-emerald-700 shadow'
+                                    : 'border-gray-200 bg-white text-gray-700 hover:border-emerald-400'
                                 }`}
                                 disabled={optionModalState.submitting}
                                 onClick={() => toggleOptionChoice(group, choice.id)}
@@ -2598,7 +2811,7 @@ export default function POSPage() {
                 ) : null}
 
                 {globalDiscountActive ? (
-                  <p className="mt-6 text-xs font-semibold text-camp-700">
+                  <p className="mt-6 text-xs font-semibold text-emerald-700">
                     Global discount applies automatically to this charge.
                   </p>
                 ) : null}
@@ -2609,7 +2822,7 @@ export default function POSPage() {
                   </div>
                   <div className="mt-1 flex items-center justify-between">
                     <span>Options</span>
-                    <span className={optionPreview.totalDelta >= 0 ? 'text-camp-600' : 'text-red-600'}>
+                    <span className={optionPreview.totalDelta >= 0 ? 'text-emerald-600' : 'text-red-600'}>
                       {optionPreview.totalDelta === 0
                         ? formatCurrency(0)
                         : `${optionPreview.totalDelta > 0 ? '+' : '-'}${formatCurrency(
@@ -2626,7 +2839,7 @@ export default function POSPage() {
                       {optionPricePreview.discounts.map((discount) => (
                         <div
                           key={discount.label}
-                          className="flex items-center justify-between text-xs text-camp-700"
+                          className="flex items-center justify-between text-xs text-emerald-700"
                         >
                           <span>{discount.label}</span>
                           <span>-{formatCurrency(discount.amount)}</span>
@@ -2646,7 +2859,7 @@ export default function POSPage() {
 
                 <div className="mt-6 flex items-center justify-end gap-3">
                   <button
-                    className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-600 shadow hover:border-camp-500"
+                    className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-600 shadow hover:border-emerald-500"
                     disabled={optionModalState.submitting}
                     onClick={closeOptionModal}
                     type="button"
@@ -2654,7 +2867,7 @@ export default function POSPage() {
                     Cancel
                   </button>
                   <button
-                    className="rounded-lg bg-camp-600 px-4 py-2 text-sm font-semibold text-white shadow hover:bg-camp-700 disabled:opacity-70"
+                    className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow hover:bg-emerald-700 disabled:opacity-70"
                     disabled={optionConfirmDisabled}
                     onClick={() => void handleOptionModalConfirm()}
                     type="button"
@@ -2689,7 +2902,7 @@ export default function POSPage() {
                       Product
                     </label>
                     <select
-                      className="mt-1 w-full rounded-lg border border-gray-300 px-4 py-2 text-sm shadow-sm focus:border-camp-500 focus:outline-none focus:ring-2 focus:ring-camp-200"
+                      className="mt-1 w-full rounded-lg border border-gray-300 px-4 py-2 text-sm shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-200"
                       disabled={editModalState.submitting}
                       id="edit-product"
                       onChange={(event) => handleEditModalProductChange(event.target.value)}
@@ -2729,7 +2942,7 @@ export default function POSPage() {
                                     className={
                                       missing
                                         ? 'font-semibold text-red-600'
-                                        : 'font-semibold text-camp-600'
+                                        : 'font-semibold text-emerald-600'
                                     }
                                   >
                                     Required
@@ -2756,8 +2969,8 @@ export default function POSPage() {
                                     key={choice.id}
                                     className={`flex flex-col items-start rounded-lg border px-3 py-2 text-left text-sm transition ${
                                       isSelected
-                                        ? 'border-camp-500 bg-camp-50 text-camp-700 shadow'
-                                        : 'border-gray-200 bg-white text-gray-700 hover:border-camp-400'
+                                        ? 'border-emerald-500 bg-emerald-50 text-emerald-700 shadow'
+                                        : 'border-gray-200 bg-white text-gray-700 hover:border-emerald-400'
                                     }`}
                                     disabled={editModalState.submitting}
                                     onClick={() => toggleEditOptionChoice(group, choice.id)}
@@ -2786,7 +2999,7 @@ export default function POSPage() {
                       Note (optional)
                     </label>
                     <textarea
-                      className="mt-2 w-full rounded-lg border border-gray-300 px-4 py-2 text-sm shadow-sm focus:border-camp-500 focus:outline-none focus:ring-2 focus:ring-camp-200"
+                      className="mt-2 w-full rounded-lg border border-gray-300 px-4 py-2 text-sm shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-200"
                       disabled={editModalState.submitting}
                       id="edit-note"
                       onChange={(event) =>
@@ -2808,7 +3021,7 @@ export default function POSPage() {
                 {editModalState.product ? (
                   <>
                     {globalDiscountActive ? (
-                      <p className="mt-6 text-xs font-semibold text-camp-700">
+                      <p className="mt-6 text-xs font-semibold text-emerald-700">
                         Global discount applies automatically when this update saves.
                       </p>
                     ) : null}
@@ -2823,7 +3036,7 @@ export default function POSPage() {
                       </div>
                       <div className="mt-1 flex items-center justify-between">
                         <span>Options</span>
-                        <span className={editOptionPreview.totalDelta >= 0 ? 'text-camp-600' : 'text-red-600'}>
+                        <span className={editOptionPreview.totalDelta >= 0 ? 'text-emerald-600' : 'text-red-600'}>
                           {editOptionPreview.totalDelta === 0
                             ? formatCurrency(0)
                             : `${editOptionPreview.totalDelta > 0 ? '+' : '-'}${formatCurrency(
@@ -2840,7 +3053,7 @@ export default function POSPage() {
                           {editPricePreview.discounts.map((discount) => (
                             <div
                               key={discount.label}
-                              className="flex items-center justify-between text-xs text-camp-700"
+                              className="flex items-center justify-between text-xs text-emerald-700"
                             >
                               <span>{discount.label}</span>
                               <span>-{formatCurrency(discount.amount)}</span>
@@ -2862,7 +3075,7 @@ export default function POSPage() {
 
                 <div className="mt-6 flex items-center justify-end gap-3">
                   <button
-                    className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-600 shadow hover:border-camp-500"
+                    className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-600 shadow hover:border-emerald-500"
                     disabled={editModalState.submitting}
                     onClick={closeEditModal}
                     type="button"
@@ -2870,7 +3083,7 @@ export default function POSPage() {
                     Cancel
                   </button>
                   <button
-                    className="rounded-lg bg-camp-600 px-4 py-2 text-sm font-semibold text-white shadow hover:bg-camp-700 disabled:opacity-70"
+                    className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow hover:bg-emerald-700 disabled:opacity-70"
                     disabled={editConfirmDisabled}
                     onClick={() => void handleEditModalSubmit()}
                     type="button"
@@ -2903,7 +3116,7 @@ export default function POSPage() {
                       Amount
                     </label>
                     <input
-                      className="mt-2 w-full rounded-lg border border-gray-300 px-4 py-2 text-base shadow-sm focus:border-camp-500 focus:outline-none focus:ring-2 focus:ring-camp-200"
+                      className="mt-2 w-full rounded-lg border border-gray-300 px-4 py-2 text-base shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-200"
                       disabled={balanceEditModalState.submitting}
                       id="balance-edit-amount"
                       inputMode="decimal"
@@ -2922,7 +3135,7 @@ export default function POSPage() {
                       Note (optional)
                     </label>
                     <textarea
-                      className="mt-2 w-full rounded-lg border border-gray-300 px-4 py-2 text-sm shadow-sm focus:border-camp-500 focus:outline-none focus:ring-2 focus:ring-camp-200"
+                      className="mt-2 w-full rounded-lg border border-gray-300 px-4 py-2 text-sm shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-200"
                       disabled={balanceEditModalState.submitting}
                       id="balance-edit-note"
                       onChange={(event) =>
@@ -2949,7 +3162,7 @@ export default function POSPage() {
                       Cancel
                     </button>
                     <button
-                      className="rounded-lg bg-camp-600 px-4 py-2 text-sm font-semibold text-white shadow hover:bg-camp-700 disabled:opacity-60"
+                      className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow hover:bg-emerald-700 disabled:opacity-60"
                       disabled={balanceEditModalState.submitting}
                       onClick={() => void handleBalanceEditSubmit()}
                       type="button"

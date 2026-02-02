@@ -180,7 +180,7 @@ const RecentTransactionsTable: React.FC<RecentTransactionsTableProps> = ({ initi
         <button
           type="button"
           onClick={refreshTransactions}
-          className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 hover:border-camp-500 disabled:opacity-60"
+          className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 hover:border-emerald-500 disabled:opacity-60"
           disabled={refreshing}
         >
           {refreshing ? 'Refreshing...' : 'Refresh'}
@@ -236,12 +236,12 @@ const RecentTransactionsTable: React.FC<RecentTransactionsTableProps> = ({ initi
                         <div className="text-xs text-gray-500">{typeLabels.secondary}</div>
                       ) : null}
                       {entry.edit_parent_transaction_id ? (
-                        <span className="mt-1 inline-flex items-center rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-blue-700">
+                        <span className="mt-1 inline-flex items-center rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-700">
                           Edited
                         </span>
                       ) : null}
                     </td>
-                    <td className={`px-3 py-2 text-right font-semibold ${amountPositive ? 'text-camp-600' : 'text-red-600'}`}>
+                    <td className={`px-3 py-2 text-right font-semibold ${amountPositive ? 'text-emerald-600' : 'text-red-600'}`}>
                       {amountPositive
                         ? `+${currencyFormatter.format(entry.amount)}`
                         : `-${currencyFormatter.format(Math.abs(entry.amount))}`}
@@ -255,7 +255,7 @@ const RecentTransactionsTable: React.FC<RecentTransactionsTableProps> = ({ initi
                         <button
                           type="button"
                           onClick={() => openBalanceEditModal(entry)}
-                          className="rounded-full border border-gray-300 px-3 py-1 text-xs font-semibold text-gray-600 shadow-sm hover:border-camp-500 hover:text-camp-700"
+                          className="rounded-full border border-gray-300 px-3 py-1 text-xs font-semibold text-gray-600 shadow-sm hover:border-emerald-400 hover:text-emerald-700"
                         >
                           Edit
                         </button>
@@ -295,7 +295,7 @@ const RecentTransactionsTable: React.FC<RecentTransactionsTableProps> = ({ initi
                       step="0.01"
                       inputMode="decimal"
                       min="-1000"
-                      className="mt-2 w-full rounded-lg border border-gray-300 px-4 py-2 text-base shadow-sm focus:border-camp-500 focus:outline-none focus:ring-2 focus:ring-camp-200"
+                      className="mt-2 w-full rounded-lg border border-gray-300 px-4 py-2 text-base shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-200"
                       value={balanceEditModalState.amount}
                       disabled={balanceEditModalState.submitting}
                       onChange={(event) =>
@@ -311,7 +311,7 @@ const RecentTransactionsTable: React.FC<RecentTransactionsTableProps> = ({ initi
                     <textarea
                       id="balance-edit-note-admin"
                       rows={3}
-                      className="mt-2 w-full rounded-lg border border-gray-300 px-4 py-2 text-sm shadow-sm focus:border-camp-500 focus:outline-none focus:ring-2 focus:ring-camp-200"
+                      className="mt-2 w-full rounded-lg border border-gray-300 px-4 py-2 text-sm shadow-sm focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-200"
                       value={balanceEditModalState.note}
                       disabled={balanceEditModalState.submitting}
                       onChange={(event) =>
@@ -337,7 +337,7 @@ const RecentTransactionsTable: React.FC<RecentTransactionsTableProps> = ({ initi
                     </button>
                     <button
                       type="button"
-                      className="rounded-lg bg-camp-600 px-4 py-2 text-sm font-semibold text-white shadow hover:bg-camp-700 disabled:opacity-60"
+                      className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow hover:bg-emerald-700 disabled:opacity-60"
                       disabled={balanceEditModalState.submitting}
                       onClick={() => void handleBalanceEditSubmit()}
                     >

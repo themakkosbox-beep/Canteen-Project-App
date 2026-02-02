@@ -30,6 +30,9 @@ export interface Product {
   active: boolean;
   discount_percent?: number;
   discount_flat?: number;
+  available_shift_ids?: string[] | null;
+  printer_station?: string | null;
+  auto_print?: boolean;
   created_at: string;
   updated_at: string;
   options_json?: string | null;
@@ -139,6 +142,9 @@ export interface AppSettingsPayload {
   globalDiscountPercent: number;
   globalDiscountFlat: number;
   featureFlags: AppFeatureFlags;
+  shifts: ShiftDefinition[];
+  activeShiftId: string | null;
+  printerStations: string[];
 }
 
 export interface AppFeatureFlags {
@@ -149,6 +155,13 @@ export interface AppFeatureFlags {
   activityLog: boolean;
   backupReminders: boolean;
   customerQr: boolean;
+}
+
+export interface ShiftDefinition {
+  id: string;
+  label: string;
+  startTime: string;
+  endTime: string;
 }
 
 export interface BackupStatus {

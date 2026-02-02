@@ -10,3 +10,6 @@
 - [x] Align POS form spacing/inputs with updated design spec (including quick filter messaging cleanup).
 - [x] Expand CSV export to include void status and option details where missing.
 - [x] Finalize release pipeline steps (stage commits, tag build, package desktop app).
+- [ ] Run `npm audit fix` and re-check remaining vulnerabilities.
+- [ ] Bump versions to 2.4.0 in root + electron app and update changelog.
+- [ ] Tag release `v2.4.0`, package desktop app, and publish release.

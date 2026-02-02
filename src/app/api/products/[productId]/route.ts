@@ -48,7 +48,19 @@ export async function PUT(
     }
 
     const body = await request.json();
-    const { name, price, barcode, category, active, options, discountPercent, discountFlat } = body;
+    const {
+      name,
+      price,
+      barcode,
+      category,
+      active,
+      options,
+      discountPercent,
+      discountFlat,
+      availableShiftIds,
+      printerStation,
+      autoPrint,
+    } = body;
 
     const discountPercentValue =
       discountPercent === undefined
@@ -94,6 +106,9 @@ export async function PUT(
       options: Array.isArray(options) ? options : options === null ? null : undefined,
       discountPercent: discountPercentValue,
       discountFlat: discountFlatValue,
+      availableShiftIds: Array.isArray(availableShiftIds) ? availableShiftIds : availableShiftIds === null ? null : undefined,
+      printerStation: printerStation === undefined ? undefined : printerStation,
+      autoPrint: autoPrint === undefined ? undefined : Boolean(autoPrint),
     });
 
     return NextResponse.json(serializeProduct(product));

@@ -19,10 +19,11 @@ export async function OPTIONS() {
   });
 }
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
     const database = DatabaseManager.getInstance();
-    const slots = await database.getQuickKeySlots();
+    const shiftId = request.nextUrl.searchParams.get('shiftId');
+    const slots = await database.getQuickKeySlots(shiftId);
 
     return NextResponse.json(
       {
@@ -52,6 +53,7 @@ export async function PUT(request: NextRequest) {
 
     const body = await request.json();
     const productIds: unknown = body?.productIds;
+    const shiftId = typeof body?.shiftId === 'string' ? body.shiftId : undefined;
 
     if (!Array.isArray(productIds)) {
       return NextResponse.json(
@@ -61,9 +63,9 @@ export async function PUT(request: NextRequest) {
     }
 
     const database = DatabaseManager.getInstance();
-    await database.setQuickKeyProductIds(productIds as Array<string | null>);
+    await database.setQuickKeyProductIds(productIds as Array<string | null>, shiftId);
 
-    const slots = await database.getQuickKeySlots();
+    const slots = await database.getQuickKeySlots(shiftId);
 
     return NextResponse.json(
       {

@@ -6,6 +6,8 @@ import type {
   Product,
   ProductOptionGroup,
   QuickKeySlot,
+  ShiftDefinition,
+  AppSettingsPayload,
 } from '@/types/database';
 import { getAdminCode, setAdminCode } from '@/lib/admin-session';
 
@@ -24,6 +26,9 @@ interface ProductFormState {
   active: boolean;
   discountPercent: string;
   discountFlat: string;
+  availableShiftIds: string[];
+  printerStation: string;
+  autoPrint: boolean;
   options: ProductOptionGroupState[];
 }
 
@@ -68,6 +73,23 @@ const formatOptionalNumberInput = (value?: number | null): string => {
   return rounded.toString();
 };
 
+const isProductAvailableForShift = (
+  product: Product,
+  shiftId: string,
+  shiftDefinitions: ShiftDefinition[]
+): boolean => {
+  if (!shiftId || shiftDefinitions.length === 0) {
+    return true;
+  }
+
+  const available = product.available_shift_ids;
+  if (!Array.isArray(available) || available.length === 0) {
+    return true;
+  }
+
+  return available.includes(shiftId);
+};
+
 export default function AdminPage() {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
@@ -87,6 +109,9 @@ export default function AdminPage() {
   const [includeInactiveProducts, setIncludeInactiveProducts] = useState(true);
   const [productCategoryFilter, setProductCategoryFilter] = useState<string>('all');
   const [productCategories, setProductCategories] = useState<string[]>([]);
+  const [shiftDefinitions, setShiftDefinitions] = useState<ShiftDefinition[]>([]);
+  const [printerStations, setPrinterStations] = useState<string[]>([]);
+  const [selectedQuickKeyShiftId, setSelectedQuickKeyShiftId] = useState<string>('');
   const [quickKeySlots, setQuickKeySlots] = useState<QuickKeySlot[]>(() => createEmptyQuickKeySlots());
   const [loadingQuickKeys, setLoadingQuickKeys] = useState(true);
   const [savingQuickKeys, setSavingQuickKeys] = useState(false);
@@ -111,6 +136,9 @@ export default function AdminPage() {
     active: true,
     discountPercent: '',
     discountFlat: '',
+    availableShiftIds: [],
+    printerStation: '',
+    autoPrint: false,
     options: [],
   });
 
@@ -149,6 +177,36 @@ export default function AdminPage() {
 
     return false;
   }, []);
+
+  const loadAppSettings = useCallback(async () => {
+    try {
+      const response = await fetch('/api/settings/app', {
+        headers: buildAdminHeaders(),
+      });
+
+      const handled = await handleAdminAuthFailure(response);
+      if (handled) {
+        return;
+      }
+
+      if (!response.ok) {
+        return;
+      }
+
+      const data: AppSettingsPayload = await response.json();
+      const shifts = Array.isArray(data.shifts) ? data.shifts : [];
+      setShiftDefinitions(shifts);
+      setPrinterStations(Array.isArray(data.printerStations) ? data.printerStations : []);
+      const defaultShift = data.activeShiftId ?? shifts[0]?.id ?? '';
+      setSelectedQuickKeyShiftId(defaultShift);
+      setProductForm((previous) => ({
+        ...previous,
+        availableShiftIds: [],
+      }));
+    } catch (error) {
+      console.warn('Failed to load app settings for shifts.', error);
+    }
+  }, [buildAdminHeaders, handleAdminAuthFailure]);
 
   const handleAdminUnlock = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -313,7 +371,10 @@ export default function AdminPage() {
       const response = await fetch('/api/settings/quick-keys', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', ...buildAdminHeaders() },
-        body: JSON.stringify({ productIds: quickKeySlots.map((slot) => slot.productId) }),
+        body: JSON.stringify({
+          productIds: quickKeySlots.map((slot) => slot.productId),
+          shiftId: selectedQuickKeyShiftId,
+        }),
       });
 
       if (await handleAdminAuthFailure(response)) {
@@ -467,9 +528,16 @@ export default function AdminPage() {
   const loadQuickKeys = useCallback(async () => {
     setLoadingQuickKeys(true);
     try {
-      const response = await fetch('/api/settings/quick-keys', {
+      const params = new URLSearchParams();
+      if (selectedQuickKeyShiftId) {
+        params.set('shiftId', selectedQuickKeyShiftId);
+      }
+      const response = await fetch(
+        `/api/settings/quick-keys${params.toString() ? `?${params}` : ''}`,
+        {
         headers: buildAdminHeaders(),
-      });
+        }
+      );
       if (await handleAdminAuthFailure(response)) {
         return;
       }
@@ -514,7 +582,7 @@ export default function AdminPage() {
     } finally {
       setLoadingQuickKeys(false);
     }
-  }, [buildAdminHeaders, handleAdminAuthFailure]);
+  }, [buildAdminHeaders, handleAdminAuthFailure, selectedQuickKeyShiftId]);
 
   const loadProductCategories = useCallback(async () => {
     try {
@@ -534,7 +602,8 @@ export default function AdminPage() {
     void loadProducts();
     void loadProductCategories();
     void loadQuickKeys();
-  }, [loadCustomers, loadProducts, loadProductCategories, loadQuickKeys]);
+    void loadAppSettings();
+  }, [loadCustomers, loadProducts, loadProductCategories, loadQuickKeys, loadAppSettings]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -725,6 +794,9 @@ export default function AdminPage() {
         normalizedDiscountPercent === undefined ? null : normalizedDiscountPercent,
       discountFlat:
         normalizedDiscountFlat === undefined ? null : normalizedDiscountFlat,
+      availableShiftIds: productForm.availableShiftIds,
+      printerStation: productForm.printerStation || null,
+      autoPrint: productForm.autoPrint,
     };
 
     try {
@@ -776,6 +848,9 @@ export default function AdminPage() {
         active: true,
         discountPercent: '',
         discountFlat: '',
+        availableShiftIds: [],
+        printerStation: '',
+        autoPrint: false,
         options: [],
       });
       setEditingProductId(null);
@@ -818,6 +893,9 @@ export default function AdminPage() {
         product.discount_flat && product.discount_flat > 0
           ? formatOptionalNumberInput(product.discount_flat)
           : '',
+      availableShiftIds: Array.isArray(product.available_shift_ids) ? product.available_shift_ids : [],
+      printerStation: product.printer_station ?? '',
+      autoPrint: Boolean(product.auto_print),
       options:
         product.options?.map((group) => ({
           id: group.id,
@@ -848,6 +926,9 @@ export default function AdminPage() {
       active: true,
       discountPercent: '',
       discountFlat: '',
+      availableShiftIds: [],
+      printerStation: '',
+      autoPrint: false,
       options: [],
     });
   };
@@ -1160,8 +1241,19 @@ export default function AdminPage() {
         map.set(slot.product.product_id, slot.product);
       }
     });
-    return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
-  }, [products, quickKeySlots]);
+
+    const assignedProductIds = new Set(
+      quickKeySlots.map((slot) => slot.productId).filter(Boolean) as string[]
+    );
+
+    return Array.from(map.values())
+      .filter(
+        (product) =>
+          assignedProductIds.has(product.product_id) ||
+          isProductAvailableForShift(product, selectedQuickKeyShiftId, shiftDefinitions)
+      )
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [products, quickKeySlots, selectedQuickKeyShiftId, shiftDefinitions]);
 
   const customerCount = useMemo(() => customers.length, [customers]);
   const productCount = useMemo(() => products.length, [products]);
@@ -1202,43 +1294,43 @@ export default function AdminPage() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-100 py-8">
-      <div className="max-w-6xl mx-auto space-y-6 px-4">
-        <header className="bg-white shadow rounded-lg p-6">
+    <div className="min-h-screen py-10">
+      <div className="mx-auto flex max-w-6xl flex-col gap-8 px-4">
+        <header className="pb-6 border-b border-slate-200">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <h1 className="text-3xl font-bold text-camp-700">Admin Panel</h1>
-              <p className="text-gray-600 mt-1">
-                Create and manage customers and products for the camp canteen.
+              <h1 className="page-title text-slate-900">Catalog workspace</h1>
+              <p className="mt-1 text-sm text-slate-500">
+                Maintain customers, products, and register shortcuts in one place.
               </p>
             </div>
           </div>
           <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div className="bg-camp-50 border border-camp-500/20 rounded-lg p-4">
-              <p className="text-sm uppercase text-camp-600 tracking-wide">Customers</p>
-              <p className="text-2xl font-semibold">{customerCount}</p>
+            <div className="rounded-xl border border-slate-200 bg-white/80 p-4">
+              <p className="text-xs uppercase tracking-[0.2em] text-emerald-600">Customers</p>
+              <p className="text-2xl font-semibold text-slate-800">{customerCount}</p>
             </div>
-            <div className="bg-camp-50 border border-camp-500/20 rounded-lg p-4">
-              <p className="text-sm uppercase text-camp-600 tracking-wide">Products</p>
-              <p className="text-2xl font-semibold">{productCount}</p>
+            <div className="rounded-xl border border-slate-200 bg-white/80 p-4">
+              <p className="text-xs uppercase tracking-[0.2em] text-emerald-600">Products</p>
+              <p className="text-2xl font-semibold text-slate-800">{productCount}</p>
             </div>
           </div>
         </header>
 
         {error && (
-          <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded">
+          <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
             {error}
           </div>
         )}
 
         {success && (
-          <div className="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded">
+          <div className="rounded-2xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-700">
             {success}
           </div>
         )}
 
         {requiresAdminCode ? (
-          <section className="rounded-lg bg-white p-8 shadow text-center space-y-4">
+          <section className="space-y-4 border border-slate-200 bg-white/80 p-8 text-center rounded-xl">
             <div>
               <h2 className="text-xl font-semibold text-gray-900">Admin Access Required</h2>
               <p className="text-sm text-gray-600 mt-1">
@@ -1270,91 +1362,91 @@ export default function AdminPage() {
           </section>
         ) : (
           <>
-            <section className="bg-white rounded-lg shadow p-6 space-y-6">
+            <section className="space-y-6 border-b border-slate-200 pb-8">
               <div>
                 <h2 className="text-xl font-semibold mb-2">
-                  {editingCustomerId ? 'Edit Customer' : 'Create Customer'}
+                  {editingCustomerId ? 'Edit customer profile' : 'Add a customer'}
                 </h2>
                 <p className="text-sm text-gray-600">
                   {editingCustomerId
-                    ? 'Update customer details and save changes.'
-                    : 'Use the registration form to assign a 4-digit ID and optional starting balance.'}
+                    ? 'Update details, then save to refresh the register instantly.'
+                    : 'Assign a 4-digit ID and optional starting balance.'}
                 </p>
               </div>
-          <form
-            onSubmit={handleCustomerSubmit}
-            className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end"
-          >
-            <div>
-              <label className="block text-sm font-medium text-gray-700">Customer ID</label>
-              <input
-                type="text"
-                inputMode="numeric"
-                maxLength={4}
-                value={customerForm.customerId}
-                onChange={(event) => {
-                  const digits = event.target.value.replace(/\D/g, '').slice(0, 4);
-                  setCustomerForm((prev) => ({ ...prev, customerId: digits }));
-                }}
-                className="pos-input w-full mt-1"
-                placeholder="1234"
-                required
-                disabled={Boolean(editingCustomerId)}
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700">Name</label>
-              <input
-                type="text"
-                value={customerForm.name}
-                onChange={(event) =>
-                  setCustomerForm((prev) => ({ ...prev, name: event.target.value }))
-                }
-                className="pos-input w-full mt-2"
-                placeholder="Camper name"
-                required
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700">Initial Balance</label>
-              <p className="text-xs text-gray-500 mt-1">Optional - defaults to 0.00 for new accounts.</p>
-              <input
-                type="number"
-                min="0"
-                step="0.01"
-                value={customerForm.initialBalance}
-                onChange={(event) =>
-                  setCustomerForm((prev) => ({ ...prev, initialBalance: event.target.value }))
-                }
-                className="pos-input w-full mt-2"
-                placeholder="0.00"
-                disabled={Boolean(editingCustomerId)}
-              />
-            </div>
-            <div>
-              <button
-                type="submit"
-                className="pos-button w-full"
-                disabled={customerForm.customerId.length !== 4}
+              <form
+                onSubmit={handleCustomerSubmit}
+                className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end"
               >
-                {editingCustomerId ? 'Update Customer' : 'Save Customer'}
-              </button>
-            </div>
-            {editingCustomerId && (
-              <div>
-                <button
-                  type="button"
-                  onClick={cancelCustomerEdit}
-                  className="w-full md:w-auto bg-gray-300 text-gray-800 font-semibold py-3 px-6 rounded-lg"
-                >
-                  Cancel Edit
-                </button>
-              </div>
-            )}
-          </form>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700">Customer ID</label>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    maxLength={4}
+                    value={customerForm.customerId}
+                    onChange={(event) => {
+                      const digits = event.target.value.replace(/\D/g, '').slice(0, 4);
+                      setCustomerForm((prev) => ({ ...prev, customerId: digits }));
+                    }}
+                    className="pos-input w-full mt-1"
+                    placeholder="1234"
+                    required
+                    disabled={Boolean(editingCustomerId)}
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700">Name</label>
+                  <input
+                    type="text"
+                    value={customerForm.name}
+                    onChange={(event) =>
+                      setCustomerForm((prev) => ({ ...prev, name: event.target.value }))
+                    }
+                    className="pos-input w-full mt-2"
+                    placeholder="Camper name"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700">Initial Balance</label>
+                  <p className="text-xs text-gray-500 mt-1">Optional - defaults to 0.00 for new accounts.</p>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={customerForm.initialBalance}
+                    onChange={(event) =>
+                      setCustomerForm((prev) => ({ ...prev, initialBalance: event.target.value }))
+                    }
+                    className="pos-input w-full mt-2"
+                    placeholder="0.00"
+                    disabled={Boolean(editingCustomerId)}
+                  />
+                </div>
+                <div>
+                  <button
+                    type="submit"
+                    className="pos-button w-full"
+                    disabled={customerForm.customerId.length !== 4}
+                  >
+                    {editingCustomerId ? 'Update Customer' : 'Save Customer'}
+                  </button>
+                </div>
+                {editingCustomerId && (
+                  <div>
+                    <button
+                      type="button"
+                      onClick={cancelCustomerEdit}
+                      className="w-full md:w-auto bg-gray-300 text-gray-800 font-semibold py-3 px-6 rounded-lg"
+                    >
+                      Cancel Edit
+                    </button>
+                  </div>
+                )}
+              </form>
 
           <div>
-            <h3 className="text-lg font-semibold mb-3">Recent Customers</h3>
+            <h3 className="text-lg font-semibold mb-3">Customer list</h3>
             <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
               <input
                 value={customerSearch}
@@ -1404,7 +1496,7 @@ export default function AdminPage() {
                           <button
                             type="button"
                             onClick={() => startEditCustomer(customer)}
-                            className="text-camp-600 hover:underline text-sm font-semibold"
+                            className="text-emerald-600 hover:underline text-sm font-semibold"
                           >
                             Edit
                           </button>
@@ -1425,13 +1517,13 @@ export default function AdminPage() {
                   Paste one customer per line using <code className="font-mono bg-gray-100 px-1 py-0.5 rounded">1234, Name, InitialBalance</code>. Name is required; leave the balance blank for zero.
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={() => setShowCustomerImport((prev) => !prev)}
-                className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700 hover:border-camp-500"
-              >
-                {showCustomerImport ? 'Hide Fields' : 'Show Fields'}
-              </button>
+                <button
+                  type="button"
+                  onClick={() => setShowCustomerImport((prev) => !prev)}
+                  className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700 hover:border-emerald-400"
+                >
+                  {showCustomerImport ? 'Hide Bulk Import' : 'Bulk Import'}
+                </button>
             </div>
             {showCustomerImport ? (
               <form onSubmit={handleBulkCustomerSubmit} className="mt-4 space-y-3">
@@ -1466,15 +1558,15 @@ export default function AdminPage() {
           </div>
         </section>
 
-        <section className="bg-white rounded-lg shadow p-6 space-y-6">
+        <section className="space-y-6 border-b border-slate-200 pb-8">
           <div>
             <h2 className="text-xl font-semibold mb-2">
-              {editingProductId ? 'Edit Product' : 'Create Product'}
+              {editingProductId ? 'Edit product' : 'Add a product'}
             </h2>
             <p className="text-sm text-gray-600">
               {editingProductId
-                ? 'Update item details and availability status.'
-                : 'Add items for sale with pricing, optional barcode, and category tags.'}
+                ? 'Update pricing, availability, and options.'
+                : 'Add items with pricing, optional barcode, and category tags.'}
             </p>
           </div>
           <form
@@ -1589,6 +1681,103 @@ export default function AdminPage() {
                 Active
               </label>
             </div>
+            <div className="md:col-span-6 rounded-lg border border-gray-200 p-4 space-y-4">
+              <div>
+                <h3 className="text-base font-semibold text-gray-800">Availability & Printing</h3>
+                <p className="text-sm text-gray-600">
+                  Control which shifts can sell this item and which printer station should receive auto-print tickets.
+                </p>
+              </div>
+              {shiftDefinitions.length > 0 ? (
+                <div className="space-y-2">
+                  <p className="text-sm font-medium text-gray-700">Shift availability</p>
+                  <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                    {shiftDefinitions.map((shift) => {
+                      const isSelected = productForm.availableShiftIds.includes(shift.id);
+                      return (
+                        <label
+                          key={shift.id}
+                          className="flex items-start gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={(event) => {
+                              const checked = event.target.checked;
+                              setProductForm((prev) => {
+                                const next = new Set(prev.availableShiftIds);
+                                if (checked) {
+                                  next.add(shift.id);
+                                } else {
+                                  next.delete(shift.id);
+                                }
+                                return { ...prev, availableShiftIds: Array.from(next) };
+                              });
+                            }}
+                            className="mt-0.5 h-4 w-4"
+                          />
+                          <span>
+                            <span className="block font-semibold text-gray-800">{shift.label}</span>
+                            <span className="block text-xs text-gray-500">
+                              {shift.startTime} - {shift.endTime}
+                            </span>
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                  <p className="text-xs text-gray-500">
+                    Leave all shifts unchecked to make the product available all day.
+                  </p>
+                </div>
+              ) : (
+                <p className="text-sm text-gray-500">
+                  Add shift definitions in Admin Settings to control availability here.
+                </p>
+              )}
+              <div className="grid gap-4 md:grid-cols-2">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700">Printer station</label>
+                  <select
+                    value={productForm.printerStation}
+                    onChange={(event) =>
+                      setProductForm((prev) => ({
+                        ...prev,
+                        printerStation: event.target.value,
+                      }))
+                    }
+                    className="pos-input w-full mt-1"
+                    disabled={printerStations.length === 0}
+                  >
+                    <option value="">
+                      {printerStations.length > 0 ? 'No station' : 'No stations configured'}
+                    </option>
+                    {printerStations.map((station) => (
+                      <option key={station} value={station}>
+                        {station}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-gray-500 mt-1">
+                    Assign a kitchen or service station for auto-print tickets.
+                  </p>
+                </div>
+                <div className="flex items-center gap-3 pt-6">
+                  <input
+                    id="product-auto-print"
+                    type="checkbox"
+                    checked={productForm.autoPrint}
+                    onChange={(event) =>
+                      setProductForm((prev) => ({ ...prev, autoPrint: event.target.checked }))
+                    }
+                    className="h-5 w-5"
+                  />
+                  <label htmlFor="product-auto-print" className="text-sm font-medium text-gray-700">
+                    Auto-print ticket on purchase
+                  </label>
+                </div>
+              </div>
+            </div>
             <div className="md:col-span-6 border border-gray-200 rounded-lg p-4 space-y-4">
               <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                 <div>
@@ -1698,7 +1887,7 @@ export default function AdminPage() {
                         <button
                           type="button"
                           onClick={() => handleAddOptionChoice(group.id)}
-                          className="rounded-lg border border-camp-500 px-3 py-2 text-sm font-semibold text-camp-600 hover:bg-camp-50"
+                          className="rounded-lg border border-emerald-500 px-3 py-2 text-sm font-semibold text-emerald-600 hover:bg-emerald-50"
                         >
                           Add Choice
                         </button>
@@ -1829,7 +2018,7 @@ export default function AdminPage() {
                           <button
                             type="button"
                             onClick={() => startEditProduct(product)}
-                            className="text-camp-600 hover:underline text-sm font-semibold"
+                            className="text-emerald-600 hover:underline text-sm font-semibold"
                           >
                             Edit
                           </button>
@@ -1853,7 +2042,7 @@ export default function AdminPage() {
               <button
                 type="button"
                 onClick={() => setShowProductImport((prev) => !prev)}
-                className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700 hover:border-camp-500"
+                className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700 hover:border-emerald-400"
               >
                 {showProductImport ? 'Hide Fields' : 'Show Fields'}
               </button>
@@ -1891,7 +2080,7 @@ export default function AdminPage() {
           </div>
         </section>
 
-        <section className="bg-white rounded-lg shadow p-6 space-y-6">
+        <section className="space-y-6 border-b border-slate-200 pb-8">
           <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
             <div>
               <h2 className="text-xl font-semibold">POS Quick Keys</h2>
@@ -1900,10 +2089,26 @@ export default function AdminPage() {
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
+              {shiftDefinitions.length > 0 ? (
+                <select
+                  value={selectedQuickKeyShiftId}
+                  onChange={(event) => {
+                    setSelectedQuickKeyShiftId(event.target.value);
+                    void loadQuickKeys();
+                  }}
+                  className="pos-input"
+                >
+                  {shiftDefinitions.map((shift) => (
+                    <option key={shift.id} value={shift.id}>
+                      {shift.label}
+                    </option>
+                  ))}
+                </select>
+              ) : null}
               <button
                 type="button"
                 onClick={handleResetQuickKeys}
-                className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700 hover:border-camp-500 disabled:opacity-50"
+                className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700 hover:border-emerald-400 disabled:opacity-50"
                 disabled={savingQuickKeys || loadingQuickKeys}
               >
                 Reset Slots
@@ -1976,7 +2181,7 @@ export default function AdminPage() {
           </p>
         </section>
 
-        <section className="bg-white rounded-lg shadow p-6 space-y-6">
+        <section className="space-y-6">
           <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
             <div>
               <h2 className="text-xl font-semibold">Data Tools</h2>

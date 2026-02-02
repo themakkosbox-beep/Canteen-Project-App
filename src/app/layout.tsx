@@ -1,34 +1,26 @@
-import '../styles/globals.css'
-import type { Metadata } from 'next'
-import Navigation from '@/components/Navigation'
-import DatabaseManager from '@/lib/database'
+import '../styles/globals.css';
+import type { Metadata } from 'next';
+import Navigation from '@/components/Navigation';
 
 export const metadata: Metadata = {
   title: 'Camp Canteen POS',
   description: 'Point of Sale system for camp canteen with prepaid accounts',
-}
+};
 
-export default async function RootLayout({
+export default function RootLayout({
   children,
 }: {
-  children: React.ReactNode
+  children: React.ReactNode;
 }) {
   const appVersion = process.env.NEXT_PUBLIC_APP_VERSION ?? '0.0.0';
-  let brandName = 'Camp Canteen POS';
-  try {
-    const database = DatabaseManager.getInstance();
-    const appSettings = await database.getAppSettings();
-    brandName = appSettings.brandName;
-  } catch (error) {
-    console.error('Failed to load navigation settings, using defaults.', error);
-  }
+  const brandName = 'Camp Canteen POS';
 
   return (
     <html lang="en">
       <head>
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
       </head>
-      <body className="bg-gray-50 min-h-screen">
+      <body className="min-h-screen app-shell">
         <Navigation brandName={brandName} />
         <main className="pt-6">
           {children}
@@ -38,5 +30,5 @@ export default async function RootLayout({
         </div>
       </body>
     </html>
-  )
+  );
 }

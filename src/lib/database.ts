@@ -16,6 +16,7 @@ import {
   AppFeatureFlags,
   AppSettingsPayload,
   CustomerTypeDefinition,
+  ShiftDefinition,
   BackupStatus,
   BackupResult,
 } from '@/types/database';
@@ -34,6 +35,9 @@ const APP_GLOBAL_DISCOUNT_FLAT_KEY = 'app_global_discount_flat';
 const APP_SCHEMA_VERSION_KEY = 'app_schema_version';
 const CUSTOMER_TYPES_SETTING_KEY = 'customer_types_v1';
 const APP_FEATURE_FLAGS_KEY = 'app_feature_flags_v1';
+const APP_SHIFT_DEFINITIONS_KEY = 'app_shift_definitions_v1';
+const APP_ACTIVE_SHIFT_KEY = 'app_active_shift_v1';
+const APP_PRINTER_STATIONS_KEY = 'app_printer_stations_v1';
 
 const DEFAULT_FEATURE_FLAGS: AppFeatureFlags = {
   offlineStatus: true,
@@ -44,6 +48,12 @@ const DEFAULT_FEATURE_FLAGS: AppFeatureFlags = {
   backupReminders: true,
   customerQr: true,
 };
+const DEFAULT_SHIFTS: ShiftDefinition[] = [
+  { id: 'breakfast', label: 'Breakfast', startTime: '07:00', endTime: '10:30' },
+  { id: 'lunch', label: 'Lunch', startTime: '11:00', endTime: '14:00' },
+  { id: 'dinner', label: 'Dinner', startTime: '17:00', endTime: '20:00' },
+];
+const DEFAULT_PRINTER_STATIONS = ['Kitchen', 'Snack Bar', 'Grill'];
 const SCHEMA_VERSION = 2;
 const ADMIN_CODE_HASH_ITERATIONS = 120000;
 const ADMIN_CODE_HASH_SALT_BYTES = 16;
@@ -214,6 +224,9 @@ export interface BulkProductInput {
   options?: ProductOptionGroup[];
   discountPercent?: number;
   discountFlat?: number;
+  availableShiftIds?: string[] | null;
+  printerStation?: string | null;
+  autoPrint?: boolean;
 }
 
 interface CustomerTypeInput {
@@ -645,6 +658,9 @@ class DatabaseManager {
     this.ensureColumn(db, 'products', 'options_json', 'TEXT');
     this.ensureColumn(db, 'products', 'discount_percent', 'REAL DEFAULT 0');
     this.ensureColumn(db, 'products', 'discount_flat', 'REAL DEFAULT 0');
+    this.ensureColumn(db, 'products', 'available_shifts', 'TEXT');
+    this.ensureColumn(db, 'products', 'printer_station', 'TEXT');
+    this.ensureColumn(db, 'products', 'auto_print', 'BOOLEAN DEFAULT 0');
     this.ensureColumn(db, 'customers', 'discount_percent', 'REAL DEFAULT 0');
     this.ensureColumn(db, 'customers', 'discount_flat', 'REAL DEFAULT 0');
     this.ensureColumn(db, 'customers', 'type_id', 'TEXT');
@@ -807,6 +823,66 @@ class DatabaseManager {
     }
   }
 
+  private readShiftDefinitions(db: SqlJsDatabase): ShiftDefinition[] {
+    const raw = this.readSetting(db, APP_SHIFT_DEFINITIONS_KEY);
+    if (!raw) {
+      this.writeSetting(db, APP_SHIFT_DEFINITIONS_KEY, JSON.stringify(DEFAULT_SHIFTS));
+      return DEFAULT_SHIFTS;
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) {
+        throw new Error('Invalid shift definition payload');
+      }
+      const normalized = parsed
+        .map((entry) => ({
+          id: typeof entry?.id === 'string' ? entry.id.trim() : '',
+          label: typeof entry?.label === 'string' ? entry.label.trim() : '',
+          startTime: typeof entry?.startTime === 'string' ? entry.startTime.trim() : '',
+          endTime: typeof entry?.endTime === 'string' ? entry.endTime.trim() : '',
+        }))
+        .filter((entry) => entry.id && entry.label && entry.startTime && entry.endTime);
+      if (normalized.length === 0) {
+        throw new Error('No shifts defined');
+      }
+      return normalized;
+    } catch (error) {
+      console.warn('Failed to parse shift definitions, resetting to defaults.', error);
+      this.writeSetting(db, APP_SHIFT_DEFINITIONS_KEY, JSON.stringify(DEFAULT_SHIFTS));
+      return DEFAULT_SHIFTS;
+    }
+  }
+
+  private readActiveShiftId(db: SqlJsDatabase, shifts: ShiftDefinition[]): string | null {
+    const raw = this.readSetting(db, APP_ACTIVE_SHIFT_KEY);
+    if (!raw) {
+      return shifts[0]?.id ?? null;
+    }
+    const trimmed = raw.trim();
+    return shifts.some((shift) => shift.id === trimmed) ? trimmed : shifts[0]?.id ?? null;
+  }
+
+  private readPrinterStations(db: SqlJsDatabase): string[] {
+    const raw = this.readSetting(db, APP_PRINTER_STATIONS_KEY);
+    if (!raw) {
+      this.writeSetting(db, APP_PRINTER_STATIONS_KEY, JSON.stringify(DEFAULT_PRINTER_STATIONS));
+      return DEFAULT_PRINTER_STATIONS;
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) {
+        throw new Error('Invalid printer station payload');
+      }
+      const normalized = parsed
+        .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+        .filter((entry) => entry.length > 0);
+      return normalized.length > 0 ? normalized : DEFAULT_PRINTER_STATIONS;
+    } catch (error) {
+      console.warn('Failed to parse printer stations, resetting to defaults.', error);
+      this.writeSetting(db, APP_PRINTER_STATIONS_KEY, JSON.stringify(DEFAULT_PRINTER_STATIONS));
+      return DEFAULT_PRINTER_STATIONS;
+    }
+  }
   public async getAppSettings(): Promise<AppSettingsPayload> {
     return this.withDatabase((db) => {
       const storedBrand = this.readSetting(db, APP_BRAND_NAME_KEY);
@@ -814,12 +890,18 @@ class DatabaseManager {
       const adminCodeHash = this.readSetting(db, APP_ADMIN_CODE_KEY);
       const globalDiscount = this.readGlobalDiscount(db);
       const featureFlags = this.readFeatureFlags(db);
+      const shifts = this.readShiftDefinitions(db);
+      const activeShiftId = this.readActiveShiftId(db, shifts);
+      const printerStations = this.readPrinterStations(db);
       return {
         brandName: normalizedBrand,
         adminCodeSet: Boolean(adminCodeHash && adminCodeHash.trim().length > 0),
         globalDiscountPercent: globalDiscount.percent,
         globalDiscountFlat: globalDiscount.flat,
         featureFlags,
+        shifts,
+        activeShiftId,
+        printerStations,
       };
     });
   }
@@ -852,6 +934,9 @@ class DatabaseManager {
     globalDiscountPercent?: number | null;
     globalDiscountFlat?: number | null;
     featureFlags?: Partial<AppFeatureFlags> | null;
+    shifts?: ShiftDefinition[] | null;
+    activeShiftId?: string | null;
+    printerStations?: string[] | null;
   }): Promise<AppSettingsPayload> {
     const nextBrand = sanitizeBrandName(options.brandName);
     const wantsClear = Boolean(options.clearAdminCode);
@@ -903,10 +988,43 @@ class DatabaseManager {
         this.writeSetting(db, APP_FEATURE_FLAGS_KEY, JSON.stringify(mergedFlags));
       }
 
+      if (Array.isArray(options.shifts)) {
+        const normalized = options.shifts
+          .map((shift) => ({
+            id: typeof shift.id === 'string' ? shift.id.trim() : '',
+            label: typeof shift.label === 'string' ? shift.label.trim() : '',
+            startTime: typeof shift.startTime === 'string' ? shift.startTime.trim() : '',
+            endTime: typeof shift.endTime === 'string' ? shift.endTime.trim() : '',
+          }))
+          .filter((shift) => shift.id && shift.label && shift.startTime && shift.endTime);
+        if (normalized.length > 0) {
+          this.writeSetting(db, APP_SHIFT_DEFINITIONS_KEY, JSON.stringify(normalized));
+        }
+      }
+
+      if (options.activeShiftId !== undefined) {
+        const raw = typeof options.activeShiftId === 'string' ? options.activeShiftId.trim() : '';
+        this.writeSetting(db, APP_ACTIVE_SHIFT_KEY, raw ? raw : null);
+      }
+
+      if (Array.isArray(options.printerStations)) {
+        const normalizedStations = options.printerStations
+          .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+          .filter((entry) => entry.length > 0);
+        this.writeSetting(
+          db,
+          APP_PRINTER_STATIONS_KEY,
+          JSON.stringify(normalizedStations.length > 0 ? normalizedStations : DEFAULT_PRINTER_STATIONS)
+        );
+      }
+
       const updatedBrand = sanitizeBrandName(this.readSetting(db, APP_BRAND_NAME_KEY)) ?? 'Camp Canteen POS';
       const adminCodeHash = this.readSetting(db, APP_ADMIN_CODE_KEY);
       const globalDiscount = this.readGlobalDiscount(db);
       const featureFlags = this.readFeatureFlags(db);
+      const shifts = this.readShiftDefinitions(db);
+      const activeShiftId = this.readActiveShiftId(db, shifts);
+      const printerStations = this.readPrinterStations(db);
 
       return {
         brandName: updatedBrand,
@@ -914,6 +1032,9 @@ class DatabaseManager {
         globalDiscountPercent: globalDiscount.percent,
         globalDiscountFlat: globalDiscount.flat,
         featureFlags,
+        shifts,
+        activeShiftId,
+        printerStations,
       };
     }, true);
   }
@@ -1289,11 +1410,34 @@ class DatabaseManager {
       typeof (raw as { discount_flat?: unknown }).discount_flat === 'number'
         ? (raw as { discount_flat: number }).discount_flat
         : 0;
+    const availableShiftsRaw = (raw as { available_shifts?: unknown }).available_shifts;
+    let available_shift_ids: string[] | null = null;
+    if (typeof availableShiftsRaw === 'string' && availableShiftsRaw.trim().length > 0) {
+      try {
+        const parsed = JSON.parse(availableShiftsRaw);
+        if (Array.isArray(parsed)) {
+          const normalized = parsed
+            .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+            .filter((entry) => entry.length > 0);
+          available_shift_ids = normalized.length > 0 ? normalized : null;
+        }
+      } catch (error) {
+        console.warn('Failed to parse available shifts for product', error);
+      }
+    }
+    const printer_station =
+      typeof (raw as { printer_station?: unknown }).printer_station === 'string'
+        ? ((raw as { printer_station: string }).printer_station || null)
+        : null;
+    const auto_print = Boolean((raw as { auto_print?: unknown }).auto_print);
     return {
       ...raw,
       discount_percent: discountPercent,
       discount_flat: discountFlat,
       options,
+      available_shift_ids,
+      printer_station,
+      auto_print,
     };
   }
 
@@ -1829,6 +1973,9 @@ class DatabaseManager {
     options?: ProductOptionGroup[];
     discountPercent?: number;
     discountFlat?: number;
+    availableShiftIds?: string[] | null;
+    printerStation?: string | null;
+    autoPrint?: boolean;
   }): Promise<Product> {
     const {
       productId,
@@ -1842,6 +1989,17 @@ class DatabaseManager {
     } = options;
     const normalizedOptions = this.normalizeProductOptions(options.options ?? null);
     const optionsJson = normalizedOptions ? JSON.stringify(normalizedOptions) : null;
+    const normalizedShiftIds = Array.isArray(options.availableShiftIds)
+      ? options.availableShiftIds
+          .map((value) => (typeof value === 'string' ? value.trim() : ''))
+          .filter((value) => value.length > 0)
+      : [];
+    const availableShiftsJson = normalizedShiftIds.length > 0 ? JSON.stringify(normalizedShiftIds) : null;
+    const normalizedPrinterStation =
+      typeof options.printerStation === 'string' && options.printerStation.trim().length > 0
+        ? options.printerStation.trim()
+        : null;
+    const normalizedAutoPrint = Boolean(options.autoPrint);
 
     if (!name || name.trim().length === 0) {
       throw new Error('Product name is required');
@@ -1885,8 +2043,21 @@ class DatabaseManager {
       }
 
       const insertStmt = db.prepare(`
-        INSERT INTO products (product_id, name, price, barcode, category, active, options_json, discount_percent, discount_flat)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO products (
+          product_id,
+          name,
+          price,
+          barcode,
+          category,
+          active,
+          options_json,
+          discount_percent,
+          discount_flat,
+          available_shifts,
+          printer_station,
+          auto_print
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       insertStmt.bind([
         finalProductId,
@@ -1898,6 +2069,9 @@ class DatabaseManager {
         optionsJson,
         normalizedDiscountPercent,
         normalizedDiscountFlat,
+        availableShiftsJson,
+        normalizedPrinterStation,
+        normalizedAutoPrint ? 1 : 0,
       ]);
       insertStmt.step();
       insertStmt.free();
@@ -2671,9 +2845,14 @@ class DatabaseManager {
     }, true);
   }
 
-  public async getQuickKeySlots(): Promise<QuickKeySlot[]> {
+  private getQuickKeySettingKey(shiftId?: string | null): string {
+    const trimmed = typeof shiftId === 'string' ? shiftId.trim() : '';
+    return trimmed ? `${QUICK_KEY_SETTING_KEY}_${trimmed}` : QUICK_KEY_SETTING_KEY;
+  }
+
+  public async getQuickKeySlots(shiftId?: string | null): Promise<QuickKeySlot[]> {
     return this.withDatabase((db) => {
-      const rawValue = this.readSetting(db, QUICK_KEY_SETTING_KEY);
+      const rawValue = this.readSetting(db, this.getQuickKeySettingKey(shiftId));
       let stored: Array<string | null> = [];
 
       if (rawValue) {
@@ -2721,7 +2900,10 @@ class DatabaseManager {
     });
   }
 
-  public async setQuickKeyProductIds(productIds: Array<string | null | undefined>) {
+  public async setQuickKeyProductIds(
+    productIds: Array<string | null | undefined>,
+    shiftId?: string | null
+  ) {
     await this.withDatabase((db) => {
       const cleaned: Array<string | null> = [];
 
@@ -2773,7 +2955,7 @@ class DatabaseManager {
 
       const normalized = uniqueOrdered.map((value) => (value && validIds.has(value) ? value : null));
 
-      this.writeSetting(db, QUICK_KEY_SETTING_KEY, JSON.stringify(normalized));
+      this.writeSetting(db, this.getQuickKeySettingKey(shiftId), JSON.stringify(normalized));
     }, true);
   }
 
@@ -3511,6 +3693,9 @@ class DatabaseManager {
       options?: ProductOptionGroup[] | null;
       discountPercent?: number | null;
       discountFlat?: number | null;
+      availableShiftIds?: string[] | null;
+      printerStation?: string | null;
+      autoPrint?: boolean | null;
     }
   ): Promise<Product> {
     return this.withDatabase((db) => {
@@ -3588,6 +3773,33 @@ class DatabaseManager {
         }
       }
 
+      const nextShiftIdsRaw =
+        updates.availableShiftIds === undefined
+          ? existing.available_shift_ids ?? null
+          : updates.availableShiftIds === null
+          ? null
+          : updates.availableShiftIds
+              .map((value) => (typeof value === 'string' ? value.trim() : ''))
+              .filter((value) => value.length > 0);
+      const nextShiftIdsJson =
+        nextShiftIdsRaw && nextShiftIdsRaw.length > 0
+          ? JSON.stringify(nextShiftIdsRaw)
+          : null;
+
+      const nextPrinterStation =
+        updates.printerStation === undefined
+          ? existing.printer_station ?? null
+          : updates.printerStation && updates.printerStation.trim().length > 0
+          ? updates.printerStation.trim()
+          : null;
+
+      const nextAutoPrint =
+        updates.autoPrint === undefined
+          ? Boolean(existing.auto_print)
+          : updates.autoPrint === null
+          ? false
+          : Boolean(updates.autoPrint);
+
       if (nextBarcode && nextBarcode !== existing.barcode) {
         const barcodeStmt = db.prepare(
           'SELECT 1 FROM products WHERE barcode = ? AND product_id <> ?'
@@ -3602,7 +3814,7 @@ class DatabaseManager {
 
       const updateStmt = db.prepare(`
         UPDATE products
-        SET name = ?, price = ?, barcode = ?, category = ?, active = ?, options_json = ?, discount_percent = ?, discount_flat = ?, updated_at = datetime('now')
+        SET name = ?, price = ?, barcode = ?, category = ?, active = ?, options_json = ?, discount_percent = ?, discount_flat = ?, available_shifts = ?, printer_station = ?, auto_print = ?, updated_at = datetime('now')
         WHERE product_id = ?
       `);
       updateStmt.bind([
@@ -3614,6 +3826,9 @@ class DatabaseManager {
         nextOptionsJson,
         nextDiscountPercent,
         nextDiscountFlat,
+        nextShiftIdsJson,
+        nextPrinterStation,
+        nextAutoPrint ? 1 : 0,
         productId,
       ]);
       updateStmt.step();
@@ -3679,6 +3894,9 @@ class DatabaseManager {
           options: entry.options,
           discountPercent: entry.discountPercent,
           discountFlat: entry.discountFlat,
+          availableShiftIds: (entry as { availableShiftIds?: string[] | null }).availableShiftIds,
+          printerStation: (entry as { printerStation?: string | null }).printerStation ?? null,
+          autoPrint: (entry as { autoPrint?: boolean }).autoPrint ?? false,
         });
         created.push(product);
       } catch (error) {

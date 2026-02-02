@@ -46,6 +46,9 @@ export async function POST(request: NextRequest) {
       options,
       discountPercent,
       discountFlat,
+      availableShiftIds,
+      printerStation,
+      autoPrint,
     } = await request.json();
 
     if (!name || typeof name !== 'string' || name.trim().length === 0) {
@@ -102,6 +105,12 @@ export async function POST(request: NextRequest) {
       options: Array.isArray(options) ? options : undefined,
       discountPercent: normalizedDiscountPercent,
       discountFlat: normalizedDiscountFlat,
+      availableShiftIds: Array.isArray(availableShiftIds) ? availableShiftIds : undefined,
+      printerStation:
+        typeof printerStation === 'string' && printerStation.trim().length > 0
+          ? printerStation.trim()
+          : null,
+      autoPrint: Boolean(autoPrint),
     });
 
     return NextResponse.json(serializeProduct(product), { status: 201 });
@@ -181,4 +190,3 @@ export async function PATCH(request: NextRequest) {
     );
   }
 }
-
